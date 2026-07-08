@@ -1,7 +1,7 @@
 (library
  (name lib)
  (modules ast lexer parser semantic ir)
- (wrapped false))
+)
 
 (ocamllex lexer)
 (menhir (modules parser))
