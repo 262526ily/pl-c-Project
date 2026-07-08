@@ -1,0 +1,7 @@
+const int PI = 3;
+
+int main() {
+    int r = 2;
+    int area = PI * r * r;
+    return area;
+}

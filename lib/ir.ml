@@ -78,7 +78,7 @@ let add_local g name = if not (List.mem name g.locals) then g.locals <- name :: 
 let rec gen_expr g (e: Ast.expr) : operand =
   match e with
   | Ast.EInt n -> Const n
-  | Ast.EId name -> add_local g name; Var name
+  | Ast.EId name -> Var name   
   | Ast.EBinOp (op, e1, e2) ->
       (match op with
        | Ast.And -> gen_short_circuit g e1 e2 true
@@ -146,15 +146,14 @@ let rec gen_stmt g (loop: loop_labels option) (s: Ast.stmt) : unit =
   | Ast.SExpr e -> 
       let _ = gen_expr g e in ()
   | Ast.SDecl (Ast.VarDecl (name, init)) ->
-      add_local g name;
+      add_local g name;   
       let t = gen_expr g init in
       emit g (Assign (Var name, t))
   | Ast.SDecl (Ast.ConstDecl (name, init)) ->
-      add_local g name;
+      add_local g name;   
       let t = gen_expr g init in
       emit g (Assign (Var name, t))
   | Ast.SAssign (name, e) ->
-      add_local g name;
       let t = gen_expr g e in
       emit g (Assign (Var name, t))
   | Ast.SIf (cond, then_s, else_s) ->

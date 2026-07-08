@@ -1,0 +1,170 @@
+Building project...
+
+########################################
+#     Semantic & IR Test Suite         #
+########################################
+
+========== FUNCTIONAL TESTS ==========
+
+========================================
+Test #1: Basic main with return
+[0;32m✓ PASS[0m
+
+========================================
+Test #2: Variable declaration
+[0;32m✓ PASS[0m
+
+========================================
+Test #3: Arithmetic
+[0;32m✓ PASS[0m
+
+========================================
+Test #4: If-else true
+[0;32m✓ PASS[0m
+
+========================================
+Test #5: If-else false
+[0;32m✓ PASS[0m
+
+========================================
+Test #6: While loop
+[0;32m✓ PASS[0m
+
+========================================
+Test #7: Break in loop
+[0;32m✓ PASS[0m
+
+========================================
+Test #8: Continue in loop
+[0;32m✓ PASS[0m
+
+========================================
+Test #9: Nested blocks
+[0;32m✓ PASS[0m
+
+========================================
+Test #10: Function call
+[0;32m✓ PASS[0m
+
+========================================
+Test #11: Multiple functions
+[0;32m✓ PASS[0m
+
+========================================
+Test #12: Void function
+[0;32m✓ PASS[0m
+
+========================================
+Test #13: Const global
+[0;32m✓ PASS[0m
+
+========================================
+Test #14: Short circuit AND
+[0;32m✓ PASS[0m
+
+========================================
+Test #15: Short circuit OR
+[0;32m✓ PASS[0m
+
+========================================
+Test #16: Unary operators
+[0;32m✓ PASS[0m
+
+========================================
+Test #17: Relational operators
+[0;32m✓ PASS[0m
+
+========================================
+Test #18: Complex expression
+[0;32m✓ PASS[0m
+
+========== SEMANTIC ERROR TESTS ==========
+
+========================================
+Test #19: Undeclared variable
+[0;32m✓ PASS[0m
+
+========================================
+Test #20: Undeclared in expr
+[0;32m✓ PASS[0m
+
+========================================
+Test #21: Undeclared function
+[0;32m✓ PASS[0m
+
+========================================
+Test #22: Const assignment
+[0;32m✓ PASS[0m
+
+========================================
+Test #23: Missing main
+[0;32m✓ PASS[0m
+
+========================================
+Test #24: Main wrong return type
+[0;32m✓ PASS[0m
+
+========================================
+Test #25: Main with parameters
+[0;32m✓ PASS[0m
+
+========================================
+Test #26: Break outside loop
+[0;32m✓ PASS[0m
+
+========================================
+Test #27: Continue outside loop
+[0;32m✓ PASS[0m
+
+========================================
+Test #28: Wrong arg count (too few)
+[0;32m✓ PASS[0m
+
+========================================
+Test #29: Wrong arg count (too many)
+[0;32m✓ PASS[0m
+
+========================================
+Test #30: Missing return
+[0;32m✓ PASS[0m
+
+========================================
+Test #31: Void returns value
+[0;32m✓ PASS[0m
+
+========================================
+Test #32: Redeclaration
+[0;32m✓ PASS[0m
+
+========================================
+Test #33: Function redeclaration
+[0;32m✓ PASS[0m
+
+========================================
+Test #34: Use before declare
+[0;32m✓ PASS[0m
+
+========== EDGE CASE TESTS ==========
+
+========================================
+Test #35: Empty block
+[0;32m✓ PASS[0m
+
+========================================
+Test #36: Single stmt block
+[0;32m✓ PASS[0m
+
+========================================
+Test #37: Deeply nested
+[0;32m✓ PASS[0m
+
+========================================
+Test #38: Zero init
+[0;32m✓ PASS[0m
+
+========================================
+Test #39: Negative number
+[0;32m✓ PASS[0m
+
+Passed: 39 / 39
+Failed: 0 / 39
