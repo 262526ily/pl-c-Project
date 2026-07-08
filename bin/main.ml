@@ -11,11 +11,27 @@ let () =
     (* 2. 调用语法分析器入口：Parser.prog *)
     let ast = Lib.Parser.prog Lib.Lexer.token lexbuf in
     
-    (* 3. 调试输出：可视化打印生成的抽象语法树 *)
+    (* 3. 调试输出：打印AST *)
     Lib.Ast.dump_ast ast;
-    
-    (* 4. 打印统计信息 *)
+
+    (* 4. 语义分析 + IR生成 *)
+    (match Lib.Semantic.analyze ast with
+    | Error errors ->
+        List.iter
+          (fun e ->
+              Printf.printf "%s\n"
+                (Lib.Semantic.report_error e))
+          errors;
+        exit 1
+
+    | Ok ir ->
+        Printf.printf "Semantic check success!\n";
+        Lib.Ir.dump_ir ir
+    );
+
+    (* 5. 打印统计信息 *)
     Printf.printf "Success: Units parsed: %d\n" (List.length ast)
+
   with
   | Lib.Lexer.Error msg ->
       (* 词法阶段错误处理 *)
