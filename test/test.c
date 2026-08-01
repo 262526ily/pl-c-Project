@@ -1,1 +1,2 @@
-int square(int x) { return x * x; } int main() { int a = 5; return square(a); }
+const int a = 2+3;
+int main() { return a*2; }

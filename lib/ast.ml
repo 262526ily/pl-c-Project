@@ -1,5 +1,8 @@
+(* lib/ast.ml *)
+
 (* 二元运算符类型 *)
 type binop = Add | Sub | Mul | Div | Mod | Eq | Ne | Lt | Gt | Le | Ge | And | Or
+
 (* 一元运算符类型 *)
 type unop = Pos | Neg | Not
 
@@ -117,3 +120,87 @@ let dump_ast prog =
   print_endline "--- AST DUMP ---";
   List.iter dump_unit prog;
   print_endline "----------------"
+
+(* ============================================================ *)
+(* 优化 Pass 1: 常量折叠                                        *)
+(* ============================================================ *)
+
+(* 判断表达式是否为常量 *)
+let rec is_const_expr = function
+  | EInt _ -> true
+  | EId _ -> false
+  | EBinOp (_, l, r) -> is_const_expr l && is_const_expr r
+  | EUnOp (_, e) -> is_const_expr e
+  | ECall _ -> false
+
+(* 折叠常量表达式 *)
+let rec fold_const_expr = function
+  | EInt n -> EInt n
+  | EId s -> EId s
+  | EBinOp (op, l, r) ->
+      let l' = fold_const_expr l in
+      let r' = fold_const_expr r in
+      (match l', r' with
+       | EInt a, EInt b ->
+           EInt (match op with
+             | Add -> a + b
+             | Sub -> a - b
+             | Mul -> a * b
+             | Div -> if b = 0 then failwith "division by zero" else a / b
+             | Mod -> if b = 0 then failwith "modulo by zero" else a mod b
+             | Eq -> if a = b then 1 else 0
+             | Ne -> if a <> b then 1 else 0
+             | Lt -> if a < b then 1 else 0
+             | Gt -> if a > b then 1 else 0
+             | Le -> if a <= b then 1 else 0
+             | Ge -> if a >= b then 1 else 0
+             | And -> (if a <> 0 && b <> 0 then 1 else 0)
+             | Or -> (if a <> 0 || b <> 0 then 1 else 0))
+       | _ -> EBinOp (op, l', r'))
+  | EUnOp (op, e) ->
+      let e' = fold_const_expr e in
+      (match op, e' with
+       | Neg, EInt n -> EInt (-n)
+       | Not, EInt n -> EInt (if n = 0 then 1 else 0)
+       | _ -> EUnOp (op, e'))
+  | ECall (name, args) ->
+      ECall (name, List.map fold_const_expr args)
+
+(* 折叠声明中的常量 - 不需要 rec *)
+let fold_const_decl = function
+  | VarDecl (id, e) -> VarDecl (id, fold_const_expr e)
+  | ConstDecl (id, e) -> ConstDecl (id, fold_const_expr e)
+
+(* 折叠语句中的常量 *)
+let rec fold_const_stmt = function
+  | SBlock stmts -> SBlock (List.map fold_const_stmt stmts)
+  | SEmpty -> SEmpty
+  | SExpr e -> SExpr (fold_const_expr e)
+  | SDecl d -> SDecl (fold_const_decl d)
+  | SAssign (id, e) -> SAssign (id, fold_const_expr e)
+  | SIf (cond, s1, s2) ->
+      let cond' = fold_const_expr cond in
+      let s1' = fold_const_stmt s1 in
+      let s2' = Option.map fold_const_stmt s2 in
+      (* 常量折叠优化：if (0) 删除真分支 *)
+      (match cond' with
+       | EInt 0 -> (match s2' with Some s -> s | None -> SEmpty)
+       | EInt n when n <> 0 -> s1'
+       | _ -> SIf (cond', s1', s2'))
+  | SWhile (cond, body) ->
+      let cond' = fold_const_expr cond in
+      let body' = fold_const_stmt body in
+      (* 常量折叠优化：while (0) 删除循环 *)
+      (match cond' with
+       | EInt 0 -> SEmpty
+       | _ -> SWhile (cond', body'))
+  | SBreak -> SBreak
+  | SContinue -> SContinue
+  | SReturn e -> SReturn (Option.map fold_const_expr e)
+
+(* 折叠整个程序 *)
+let fold_const_prog prog =
+  List.map (function
+    | UDecl d -> UDecl (fold_const_decl d)
+    | UFunc f -> UFunc { f with body = fold_const_stmt f.body }
+  ) prog

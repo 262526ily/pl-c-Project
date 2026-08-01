@@ -21,3 +21,7 @@ bash
 dune build
 cat test/test.c(源代码相对地址) | dune exec ./_build/default/bin/main.exe(程序相对地址) > test.s(自定义标准输出)
 执行后即可在 bash 打开位置生成 test.s 汇编文件。
+
+
+
+在原来的基础上实现了常量折叠和算术优化

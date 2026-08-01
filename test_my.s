@@ -4,7 +4,7 @@
     .data
     .align 2
 a:
-    .space 4
+    .word 5
 
     .text
     .globl main
