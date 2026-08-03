@@ -300,15 +300,63 @@ let gen_func (f: Ast.func_def) : ir_func =
 
 (* 程序生成 *)
 
+(* 编译期常量求值：用于计算全局变量/常量的静态初值（含常量链、算术、比较等） *)
+let eval_binop = Ast.(function
+  | Add -> ( + )
+  | Sub -> ( - )
+  | Mul -> ( * )
+  | Div -> ( / )
+  | Mod -> ( mod )
+  | Eq -> (fun a b -> if a = b then 1 else 0)
+  | Ne -> (fun a b -> if a <> b then 1 else 0)
+  | Lt -> (fun a b -> if a < b then 1 else 0)
+  | Gt -> (fun a b -> if a > b then 1 else 0)
+  | Le -> (fun a b -> if a <= b then 1 else 0)
+  | Ge -> (fun a b -> if a >= b then 1 else 0)
+  | And -> (fun a b -> if a <> 0 && b <> 0 then 1 else 0)
+  | Or -> (fun a b -> if a <> 0 || b <> 0 then 1 else 0))
+
+(* 在给定全局环境中求值表达式；无法确定时返回 None *)
+let rec eval_const (env: (string * int) list) (e: Ast.expr) : int option =
+  match e with
+  | Ast.EInt n -> Some n
+  | Ast.EId name -> List.assoc_opt name env
+  | Ast.EBinOp (op, e1, e2) ->
+      (* 对 && / || 做短路求值，避免 0 && (1/0) 之类的除零 *)
+      (match op, eval_const env e1 with
+       | Ast.And, Some 0 -> Some 0
+       | Ast.Or, Some n when n <> 0 -> Some 1
+       | _, Some a ->
+           (match eval_const env e2 with
+            | Some b ->
+                (match op with
+                 | Ast.Div | Ast.Mod when b = 0 -> None
+                 | _ -> Some (eval_binop op a b))
+            | None -> None)
+       | _, None -> None)
+  | Ast.EUnOp (op, e) ->
+      (match eval_const env e with
+       | Some n ->
+           (match op with
+            | Ast.Pos -> Some n
+            | Ast.Neg -> Some (-n)
+            | Ast.Not -> Some (if n = 0 then 1 else 0))
+       | None -> None)
+  | Ast.ECall _ -> None
+
 (* 将 AST 程序（函数和全局变量声明列表）转换为 IR 程序 *)
 let generate (prog: Ast.prog) : ir_program =
+  (* 按声明顺序累积的全局常量/变量求值环境 *)
+  let env = ref [] in
   List.filter_map (function
     | Ast.UFunc f -> Some (Function (gen_func f))
     | Ast.UDecl (Ast.VarDecl (name, init)) -> 
-        let v = match init with Ast.EInt n -> Some n | _ -> None in
+        let v = eval_const !env init in
+        (match v with Some n -> env := (name, n) :: !env | None -> ());
         Some (GlobalVar (name, v))
     | Ast.UDecl (Ast.ConstDecl (name, init)) ->
-        let v = match init with Ast.EInt n -> Some n | _ -> None in
+        let v = eval_const !env init in
+        (match v with Some n -> env := (name, n) :: !env | None -> ());
         Some (GlobalVar (name, v))
   ) prog
 
