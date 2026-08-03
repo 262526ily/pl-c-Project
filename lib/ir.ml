@@ -45,13 +45,12 @@ type ir_program = ir_program_item list
 
 type gen = {
   mutable temp_cnt: int;
-  mutable label_cnt: int;
   mutable instrs: tac list;
   mutable locals: string list;
 }
 
 (* 创建一个新的 IR 生成器状态，初始化临时变量和标签计数器 *)
-let new_gen () = { temp_cnt = 0; label_cnt = 0; instrs = []; locals = [] }
+let new_gen () = { temp_cnt = 0; instrs = []; locals = [] }
 
 (* 生成一个新的临时变量（Temp n），并递增计数器 *)
 let fresh_temp g =
@@ -60,10 +59,12 @@ let fresh_temp g =
   Temp t
 
 (* 生成一个新的标签（如 "L0"），并递增计数器 *)
-let fresh_label g =
-  let l = g.label_cnt in
-  g.label_cnt <- l + 1;
-  "L" ^ string_of_int l
+ let global_label_cnt = ref 0
+
+ let fresh_label () =
+   let l = !global_label_cnt in
+   global_label_cnt := l + 1;
+   "L" ^ string_of_int l
 
 (* 向当前生成器的指令列表中添加一条 TAC 指令 *)
 let emit g i = g.instrs <- i :: g.instrs
@@ -107,8 +108,8 @@ and gen_normal_binop g op e1 e2 =
 (* 生成逻辑与/或的短路求值 TAC 代码 *)
 and gen_short_circuit g e1 e2 is_and =
   let result = fresh_temp g in
-  let short_l = fresh_label g in
-  let end_l = fresh_label g in
+  let short_l = fresh_label () in
+  let end_l = fresh_label () in
 
   let o1 = gen_expr g e1 in
   emit g (Assign (result, o1));
@@ -157,8 +158,8 @@ let rec gen_stmt g (loop: loop_labels option) (s: Ast.stmt) : unit =
       let t = gen_expr g e in
       emit g (Assign (Var name, t))
   | Ast.SIf (cond, then_s, else_s) ->
-      let else_l = fresh_label g in
-      let end_l = fresh_label g in
+      let else_l = fresh_label () in
+      let end_l = fresh_label () in
       let cond_t = gen_expr g cond in
       emit g (IfNotGoto (cond_t, else_l));
       gen_stmt g loop then_s;
@@ -167,9 +168,9 @@ let rec gen_stmt g (loop: loop_labels option) (s: Ast.stmt) : unit =
       Option.iter (gen_stmt g loop) else_s;
       emit g (Label end_l)
   | Ast.SWhile (cond, body) ->
-      let cond_l = fresh_label g in
-      let body_l = fresh_label g in
-      let end_l = fresh_label g in
+      let cond_l = fresh_label () in
+      let body_l = fresh_label () in
+      let end_l = fresh_label () in
       let new_loop = { break_l = end_l; continue_l = cond_l } in
 
       
