@@ -47,10 +47,12 @@ type gen = {
   mutable temp_cnt: int;
   mutable instrs: tac list;
   mutable locals: string list;
+  mutable unique_cnt: int;
+  mutable scopes: (string * string) list list;
 }
 
 (* 创建一个新的 IR 生成器状态，初始化临时变量和标签计数器 *)
-let new_gen () = { temp_cnt = 0; instrs = []; locals = [] }
+let new_gen () = { temp_cnt = 0; instrs = []; locals = []; unique_cnt = 0; scopes = [] }
 
 (* 生成一个新的临时变量（Temp n），并递增计数器 *)
 let fresh_temp g =
@@ -73,13 +75,51 @@ let emit g i = g.instrs <- i :: g.instrs
 let add_local g name = if not (List.mem name g.locals) then g.locals <- name :: g.locals
 
 
+(* 作用域感知的局部变量唯一命名：
+   同名变量在不同作用域中会生成不同的 IR 名字（如 x$0、x$1），
+   避免被遮蔽的变量在代码生成时塌缩到同一个栈槽。 *)
+
+(* 进入新的局部作用域（对应一个花括号块或函数参数区） *)
+let enter_scope g = g.scopes <- [] :: g.scopes
+
+(* 退出当前作用域 *)
+let exit_scope g =
+  match g.scopes with
+  | _ :: rest -> g.scopes <- rest
+  | [] -> failwith "scope underflow"
+
+(* 从内向外查找名字的局部重命名 *)
+let rec find_binding name = function
+  | [] -> None
+  | scope :: rest ->
+      (match List.assoc_opt name scope with
+       | Some u -> Some u
+       | None -> find_binding name rest)
+
+(* 解析变量名：局部变量返回其唯一名；未找到则视为全局符号，保持原名 *)
+let resolve_name g name =
+  match find_binding name g.scopes with
+  | Some u -> u
+  | None -> name
+
+(* 为当前作用域的新声明分配唯一名（$ 不会出现在用户标识符中，避免冲突） *)
+let bind g name =
+  let u = Printf.sprintf "%s$%d" name g.unique_cnt in
+  g.unique_cnt <- g.unique_cnt + 1;
+  (match g.scopes with
+   | scope :: rest -> g.scopes <- ((name, u) :: scope) :: rest
+   | [] -> g.scopes <- [[(name, u)]]);
+  add_local g u;
+  u
+
+
 (* 表达式生成（支持短路计算） *)
 
 (* 将 AST 表达式转换为 TAC 操作数，生成对应的中间代码 *)
 let rec gen_expr g (e: Ast.expr) : operand =
   match e with
   | Ast.EInt n -> Const n
-  | Ast.EId name -> Var name   
+  | Ast.EId name -> Var (resolve_name g name)
   | Ast.EBinOp (op, e1, e2) ->
       (match op with
        | Ast.And -> gen_short_circuit g e1 e2 true
@@ -142,21 +182,23 @@ type loop_labels = {
 let rec gen_stmt g (loop: loop_labels option) (s: Ast.stmt) : unit =
   match s with
   | Ast.SBlock stmts ->
-      List.iter (gen_stmt g loop) stmts
+      enter_scope g;
+      List.iter (gen_stmt g loop) stmts;
+      exit_scope g
   | Ast.SEmpty -> ()
   | Ast.SExpr e -> 
       let _ = gen_expr g e in ()
   | Ast.SDecl (Ast.VarDecl (name, init)) ->
-      add_local g name;   
       let t = gen_expr g init in
-      emit g (Assign (Var name, t))
+      let u = bind g name in
+      emit g (Assign (Var u, t))
   | Ast.SDecl (Ast.ConstDecl (name, init)) ->
-      add_local g name;   
       let t = gen_expr g init in
-      emit g (Assign (Var name, t))
+      let u = bind g name in
+      emit g (Assign (Var u, t))
   | Ast.SAssign (name, e) ->
       let t = gen_expr g e in
-      emit g (Assign (Var name, t))
+      emit g (Assign (Var (resolve_name g name), t))
   | Ast.SIf (cond, then_s, else_s) ->
       let else_l = fresh_label () in
       let end_l = fresh_label () in
@@ -222,8 +264,10 @@ let split_blocks (instrs: tac list) : basic_block list =
 (* 将 AST 函数定义转换为完整的 IR 函数（含基本块划分） *)
 let gen_func (f: Ast.func_def) : ir_func =
   let g = new_gen () in
-  List.iter (add_local g) f.Ast.params;
+  enter_scope g;
+  let param_names = List.map (fun p -> bind g p) f.Ast.params in
   gen_stmt g None f.Ast.body;
+  exit_scope g;
 
   (* FIX: 确保 void 函数有 return，避免空指令序列 *)
   (match f.Ast.retty with
@@ -240,14 +284,14 @@ let gen_func (f: Ast.func_def) : ir_func =
   match blocks with
   | [] ->
       { fname = f.Ast.name;
-        params = f.Ast.params;
+        params = param_names;
         locals = g.locals;
         temps = g.temp_cnt;
         entry = { label = "entry"; instrs = [] };
         blocks = [] }
   | entry :: rest ->
       { fname = f.Ast.name;
-        params = f.Ast.params;
+        params = param_names;
         locals = g.locals;
         temps = g.temp_cnt;
         entry;
