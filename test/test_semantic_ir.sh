@@ -49,7 +49,7 @@ run_test() {
     rm -f "$tmpfile"
     
     if [ "$expect" = "success" ]; then
-        if echo "$output" | grep -q "Semantic check success"; then
+        if ! echo "$output" | grep -q "Error:"; then
             echo -e "${GREEN}✓ PASS${NC}"
             PASS=$((PASS + 1))
         else

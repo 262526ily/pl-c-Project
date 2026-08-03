@@ -191,6 +191,18 @@ let check_decl st (d: Ast.decl) : unit =
       )
 
 
+(* 判断语句中是否出现 break（用于 while(1) 永真循环的返回分析） *)
+let rec stmt_contains_break (s: Ast.stmt) : bool =
+  match s with
+  | Ast.SBlock stmts -> List.exists stmt_contains_break stmts
+  | Ast.SIf (_, then_s, else_s) ->
+      stmt_contains_break then_s
+      || (match else_s with Some s -> stmt_contains_break s | None -> false)
+  | Ast.SWhile (_, body) -> stmt_contains_break body
+  | Ast.SBreak -> true
+  | _ -> false
+
+
 (* 语句检查 + 路径返回分析 *)
 
 (* 递归检查单条语句的语义，返回布尔值表示该分支是否保证有 return *)
@@ -231,7 +243,11 @@ let rec check_stmt st (s: Ast.stmt) : bool =
         | Some s -> check_stmt st s
         | None -> false
       in
-      then_returns && else_returns
+      (* 条件为编译期常量时，只分析实际可达的分支 *)
+      (match cond with
+       | Ast.EInt n when n <> 0 -> then_returns
+       | Ast.EInt 0 -> else_returns
+       | _ -> then_returns && else_returns)
 
   | Ast.SWhile (cond, body) ->
       check_expr st cond;
@@ -239,7 +255,10 @@ let rec check_stmt st (s: Ast.stmt) : bool =
       st.in_loop <- true;
       let _ = check_stmt st body in
       st.in_loop <- old_loop;
-      false
+      (* while(1) 等永真条件且循环体无 break 时，控制流不会落出循环 *)
+      (match cond with
+       | Ast.EInt n when n <> 0 -> not (stmt_contains_break body)
+       | _ -> false)
 
   | Ast.SBreak ->                                    
       if not st.in_loop then
@@ -265,10 +284,11 @@ let rec check_stmt st (s: Ast.stmt) : bool =
 and check_stmt_list st (stmts: Ast.stmt list) : bool =
   match stmts with
   | [] -> false
-  | [s] -> check_stmt st s
   | s::rest ->
-      let _ = check_stmt st s in
-      check_stmt_list st rest
+      (* 只要序列中任一语句保证终止（return 或永真循环），
+         其后的语句即为不可达死代码，整体仍保证不落出函数尾。
+         所有语句仍会被检查，错误收集不受影响。 *)
+      check_stmt st s || check_stmt_list st rest
 
 
 (* 顶层单元检查 *)

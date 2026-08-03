@@ -283,9 +283,10 @@ let emit_tac fname tac_inst map current_args =
       current_args := x :: !current_args
 
   | Call (dest, callee, nargs) ->
-      let call_args_rev, rem = split_at nargs !current_args in
+      let call_args, rem = split_at nargs !current_args in
       current_args := rem;
-      let args = List.rev call_args_rev in
+      (* FIX: Params 累积时已是源码顺序（首个参数在头），不要再反转 *)
+      let args = call_args in
       
       (* 如果调用的函数参数超过 8 个，需要为其在 sp 低位开辟动态传参空间 *)
       let extra_space = if nargs > 8 then ((nargs - 8) * 4 + 15) / 16 * 16 else 0 in
