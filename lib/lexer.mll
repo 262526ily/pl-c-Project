@@ -10,6 +10,7 @@ let id = alpha (alpha | digit)*
 let whitespace = [' ' '\t' '\n' '\r']+
 
 rule token = parse
+  | "\xEF\xBB\xBF" { token lexbuf }
   | whitespace { token lexbuf }           (* 跳过空白符 *)
   | "//" [^ '\n']* { token lexbuf }       (* 跳过单行注释 *)
   | "/*" { multi_comment lexbuf }          (* 进入多行注释处理 *)
