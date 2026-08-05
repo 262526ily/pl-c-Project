@@ -5,7 +5,7 @@
  * 并支持基本块划分、短路求值、循环控制流（break/continue）等功能。
  * 最后提供了一组打印函数，用于输出 IR 的可读形式。
  *
- * 优化：支持常量折叠，在编译期计算常量表达式的值。
+ * 优化：支持常量折叠和常量传播，在编译期计算常量表达式的值。
  *)
 
  type operand =
@@ -51,6 +51,7 @@ type gen = {
  mutable locals: string list;
  mutable unique_cnt: int;
  mutable scopes: (string * string) list list;
+ mutable const_env: (string * int) list;  (* 常量环境：变量名 -> 常量值 *)
 }
 
 (* ==================== 常量折叠优化 ==================== *)
@@ -110,7 +111,14 @@ let fold_special_binop op x y =
  | _ -> None
 
 (* 创建新的 IR 生成器状态，初始化临时变量和标签计数器 *)
-let new_gen () = { temp_cnt = 0; instrs = []; locals = []; unique_cnt = 0; scopes = [] }
+let new_gen () = { 
+ temp_cnt = 0; 
+ instrs = []; 
+ locals = []; 
+ unique_cnt = 0; 
+ scopes = [];
+ const_env = [];
+}
 
 (* 生成一个新的临时变量（Temp n），并递增计数器 *)
 let fresh_temp g =
@@ -131,7 +139,6 @@ let emit g i = g.instrs <- i :: g.instrs
 
 (* 将变量名加入当前函数的局部变量列表（去重） *)
 let add_local g name = if not (List.mem name g.locals) then g.locals <- name :: g.locals
-
 
 (* 作用域感知的局部变量唯一命名：
   同名变量在不同作用域中会生成不同的 IR 名字（如 x$0、x$1），
@@ -170,14 +177,32 @@ let bind g name =
  add_local g u;
  u
 
+(* 在常量环境中查找变量的常量值 *)
+let find_const_value g name =
+ List.assoc_opt name g.const_env
 
-(* 表达式生成（支持常量折叠和短路计算） *)
+(* 添加常量到环境 *)
+let add_const g name value =
+ g.const_env <- (name, value) :: g.const_env
+
+(* 清除当前作用域的常量（退出作用域时调用） *)
+let pop_const_scope g =
+ g.const_env <- []
+
+(* ==================== 表达式生成（支持常量折叠和常量传播） ==================== *)
 
 (* 将 AST 表达式转换为 TAC 操作数，生成对应的中间代码 *)
 let rec gen_expr g (e: Ast.expr) : operand =
  match e with
  | Ast.EInt n -> Const n
- | Ast.EId name -> Var (resolve_name g name)
+ | Ast.EId name ->
+     let u = resolve_name g name in
+     (* 常量传播：检查变量是否被赋值为常量 *)
+     begin match find_const_value g u with
+     | Some n -> Const n
+     | None -> Var u
+     end
+     
  | Ast.EBinOp (op, e1, e2) ->
      let o1 = gen_expr g e1 in
      let o2 = gen_expr g e2 in
@@ -200,8 +225,9 @@ let rec gen_expr g (e: Ast.expr) : operand =
      | _ ->
          (* 尝试特殊的算术恒等式优化 *)
          begin match fold_special_binop op o1 o2 with
-         | Some (Const n) -> Const n
-         | Some operand -> operand  (* 直接返回操作数，无需生成指令 *)
+         | Some operand -> 
+             (* 直接返回优化后的操作数，不生成指令 *)
+             operand
          | None ->
              (* 至少一个操作数不是常量，生成普通运算 *)
              let result = fresh_temp g in
@@ -282,8 +308,7 @@ and gen_short_circuit g e1 e2 is_and =
      emit g (Label end_l);
      result
 
-
-(* 语句生成 *)
+(* ==================== 语句生成 ==================== *)
 
 type loop_labels = {
  break_l: string;
@@ -300,23 +325,45 @@ let rec gen_stmt g (loop: loop_labels option) (s: Ast.stmt) : unit =
  | Ast.SEmpty -> ()
  | Ast.SExpr e -> 
      let _ = gen_expr g e in ()
+     
  | Ast.SDecl (Ast.VarDecl (name, init)) ->
      let t = gen_expr g init in
      let u = bind g name in
+     (* 常量传播：如果是常量赋值，记录到常量环境 *)
+     begin match t with
+     | Const n -> add_const g u n
+     | _ -> ()
+     end;
      emit g (Assign (Var u, t))
+     
  | Ast.SDecl (Ast.ConstDecl (name, init)) ->
      let t = gen_expr g init in
      let u = bind g name in
+     (* 常量声明总是常量 *)
+     begin match t with
+     | Const n -> add_const g u n
+     | _ -> ()  (* 语义分析已确保 const 初始化是常量 *)
+     end;
      emit g (Assign (Var u, t))
+     
  | Ast.SAssign (name, e) ->
      let t = gen_expr g e in
-     emit g (Assign (Var (resolve_name g name), t))
+     let u = resolve_name g name in
+     (* 常量传播：如果是常量赋值，更新常量环境 *)
+     begin match t with
+     | Const n -> add_const g u n
+     | _ -> 
+         (* 如果不是常量，从常量环境中移除（变量不再是常量） *)
+         g.const_env <- List.remove_assoc u g.const_env
+     end;
+     emit g (Assign (Var u, t))
+     
  | Ast.SIf (cond, then_s, else_s) ->
      let else_l = fresh_label () in
      let end_l = fresh_label () in
      let cond_t = gen_expr g cond in
      
-     (* 检查条件是否为常量，可以进行简单的死代码消除 *)
+     (* 检查条件是否为常量，可以进行死代码消除 *)
      begin match cond_t with
      | Const 0 ->
          (* 条件恒为 false，只执行 else 分支 *)
@@ -376,8 +423,7 @@ let rec gen_stmt g (loop: loop_labels option) (s: Ast.stmt) : unit =
  | Ast.SReturn None ->
      emit g (Return None)
 
-
-(* 基本块划分 *)
+(* ==================== 基本块划分 ==================== *)
 
 (* 将 TAC 指令列表按 Label 划分为基本块列表 *)
 let split_blocks (instrs: tac list) : basic_block list =
@@ -395,8 +441,7 @@ let split_blocks (instrs: tac list) : basic_block list =
  | (Label l) :: rest -> split l [] [] rest
  | _ -> split "entry" [] [] instrs
 
-
-(* 函数生成 *)
+(* ==================== 函数生成 ==================== *)
 
 (* 将 AST 函数定义转换为完整的 IR 函数（含基本块划分） *)
 let gen_func (f: Ast.func_def) : ir_func =
@@ -434,8 +479,7 @@ let gen_func (f: Ast.func_def) : ir_func =
        entry;
        blocks = rest }
 
-
-(* 程序生成 *)
+(* ==================== 程序生成 ==================== *)
 
 (* 编译期常量求值：用于计算全局变量/常量的静态初值（含常量链、算术、比较等） *)
 let eval_binop = Ast.(function
@@ -497,8 +541,7 @@ let generate (prog: Ast.prog) : ir_program =
        Some (GlobalVar (name, v))
  ) prog
 
-
-(* 打印 *)
+(* ==================== 打印 ==================== *)
 
 (* 将操作数（Const/Var/Temp）转换为字符串 *)
 let op_str = function
