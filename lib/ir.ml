@@ -4,8 +4,6 @@
  * 将抽象语法树（AST）转换为三地址码（TAC）形式的中级中间表示，
  * 并支持基本块划分、短路求值、循环控制流（break/continue）等功能。
  * 最后提供了一组打印函数，用于输出 IR 的可读形式。
- *
- * 优化：支持常量折叠和常量传播，在编译期计算常量表达式的值。
  *)
 
  type operand =
@@ -24,6 +22,7 @@ type tac =
  | Param of operand
  | Call of operand * string * int
  | Return of operand option
+ | Empty  (* 用于优化时删除指令 *)
 
 type basic_block = {
  label: string;
@@ -51,74 +50,10 @@ type gen = {
  mutable locals: string list;
  mutable unique_cnt: int;
  mutable scopes: (string * string) list list;
- mutable const_env: (string * int) list;  (* 常量环境：变量名 -> 常量值 *)
 }
 
-(* ==================== 常量折叠优化 ==================== *)
-
-(* 常量折叠：尝试在编译期计算二元运算的结果 *)
-let fold_binop op n1 n2 =
- match op with
- | Ast.Add -> Some (n1 + n2)
- | Ast.Sub -> Some (n1 - n2)
- | Ast.Mul -> Some (n1 * n2)
- | Ast.Div -> if n2 = 0 then None else Some (n1 / n2)
- | Ast.Mod -> if n2 = 0 then None else Some (n1 mod n2)
- | Ast.Eq  -> Some (if n1 = n2 then 1 else 0)
- | Ast.Ne  -> Some (if n1 <> n2 then 1 else 0)
- | Ast.Lt  -> Some (if n1 < n2 then 1 else 0)
- | Ast.Gt  -> Some (if n1 > n2 then 1 else 0)
- | Ast.Le  -> Some (if n1 <= n2 then 1 else 0)
- | Ast.Ge  -> Some (if n1 >= n2 then 1 else 0)
- | Ast.And -> Some (if n1 <> 0 && n2 <> 0 then 1 else 0)
- | Ast.Or  -> Some (if n1 <> 0 || n2 <> 0 then 1 else 0)
-
-(* 常量折叠：尝试在编译期计算一元运算的结果 *)
-let fold_unop op n =
- match op with
- | Ast.Pos -> Some n
- | Ast.Neg -> Some (-n)
- | Ast.Not -> Some (if n = 0 then 1 else 0)
-
-(* 检查操作数是否为常量零 *)
-let is_const_zero = function
- | Const 0 -> true
- | _ -> false
-
-(* 检查操作数是否为常量一 *)
-let is_const_one = function
- | Const 1 -> true
- | _ -> false
-
-(* 额外的常量折叠优化：处理特殊的算术恒等式 *)
-let fold_special_binop op x y =
- match op, x, y with
- | Ast.Add, Const 0, _ -> Some y      (* 0 + x = x *)
- | Ast.Add, _, Const 0 -> Some x      (* x + 0 = x *)
- | Ast.Sub, _, Const 0 -> Some x      (* x - 0 = x *)
- | Ast.Mul, Const 0, _ -> Some (Const 0)  (* 0 * x = 0 *)
- | Ast.Mul, _, Const 0 -> Some (Const 0)  (* x * 0 = 0 *)
- | Ast.Mul, Const 1, _ -> Some y      (* 1 * x = x *)
- | Ast.Mul, _, Const 1 -> Some x      (* x * 1 = x *)
- | Ast.Div, _, Const 0 -> None        (* x / 0 错误 *)
- | Ast.Div, Const 0, _ -> Some (Const 0)  (* 0 / x = 0 (x != 0) *)
- | Ast.Div, _, Const 1 -> Some x      (* x / 1 = x *)
- | Ast.Mod, _, Const 0 -> None        (* x % 0 错误 *)
- | Ast.Mod, Const 0, _ -> Some (Const 0)  (* 0 % x = 0 *)
- | Ast.Mod, _, Const 1 -> Some (Const 0)  (* x % 1 = 0 *)
- | Ast.Ne, Const 0, _ -> Some y       (* 0 != x => x *)
- | Ast.Ne, _, Const 0 -> Some x       (* x != 0 => x *)
- | _ -> None
-
-(* 创建新的 IR 生成器状态，初始化临时变量和标签计数器 *)
-let new_gen () = { 
- temp_cnt = 0; 
- instrs = []; 
- locals = []; 
- unique_cnt = 0; 
- scopes = [];
- const_env = [];
-}
+(* 创建一个新的 IR 生成器状态，初始化临时变量和标签计数器 *)
+let new_gen () = { temp_cnt = 0; instrs = []; locals = []; unique_cnt = 0; scopes = [] }
 
 (* 生成一个新的临时变量（Temp n），并递增计数器 *)
 let fresh_temp g =
@@ -139,6 +74,7 @@ let emit g i = g.instrs <- i :: g.instrs
 
 (* 将变量名加入当前函数的局部变量列表（去重） *)
 let add_local g name = if not (List.mem name g.locals) then g.locals <- name :: g.locals
+
 
 (* 作用域感知的局部变量唯一命名：
   同名变量在不同作用域中会生成不同的 IR 名字（如 x$0、x$1），
@@ -177,84 +113,24 @@ let bind g name =
  add_local g u;
  u
 
-(* 在常量环境中查找变量的常量值 *)
-let find_const_value g name =
- List.assoc_opt name g.const_env
 
-(* 添加常量到环境 *)
-let add_const g name value =
- g.const_env <- (name, value) :: g.const_env
-
-(* 清除当前作用域的常量（退出作用域时调用） *)
-let pop_const_scope g =
- g.const_env <- []
-
-(* ==================== 表达式生成（支持常量折叠和常量传播） ==================== *)
+(* 表达式生成（支持短路计算） *)
 
 (* 将 AST 表达式转换为 TAC 操作数，生成对应的中间代码 *)
 let rec gen_expr g (e: Ast.expr) : operand =
  match e with
  | Ast.EInt n -> Const n
- | Ast.EId name ->
-     let u = resolve_name g name in
-     (* 常量传播：检查变量是否被赋值为常量 *)
-     begin match find_const_value g u with
-     | Some n -> Const n
-     | None -> Var u
-     end
-     
+ | Ast.EId name -> Var (resolve_name g name)
  | Ast.EBinOp (op, e1, e2) ->
-     let o1 = gen_expr g e1 in
-     let o2 = gen_expr g e2 in
-     
-     (* 尝试常量折叠 *)
-     begin match o1, o2 with
-     | Const n1, Const n2 ->
-         (* 两个操作数都是常量，在编译期计算 *)
-         begin match fold_binop op n1 n2 with
-         | Some n -> 
-             (* 折叠成功，直接返回常量，不生成任何 TAC 指令 *)
-             Const n
-         | None ->
-             (* 除零等错误，生成普通运算指令（但这种情况在语义分析中已被阻止） *)
-             let result = fresh_temp g in
-             emit g (AssignBinOp (result, op, o1, o2));
-             result
-         end
-         
-     | _ ->
-         (* 尝试特殊的算术恒等式优化 *)
-         begin match fold_special_binop op o1 o2 with
-         | Some operand -> 
-             (* 直接返回优化后的操作数，不生成指令 *)
-             operand
-         | None ->
-             (* 至少一个操作数不是常量，生成普通运算 *)
-             let result = fresh_temp g in
-             emit g (AssignBinOp (result, op, o1, o2));
-             result
-         end
-     end
-     
+     (match op with
+      | Ast.And -> gen_short_circuit g e1 e2 true
+      | Ast.Or  -> gen_short_circuit g e1 e2 false
+      | _ -> gen_normal_binop g op e1 e2)
  | Ast.EUnOp (op, e) ->
      let o = gen_expr g e in
-     begin match o with
-     | Const n ->
-         (* 一元运算的操作数是常量，在编译期计算 *)
-         begin match fold_unop op n with
-         | Some n -> Const n
-         | None ->
-             (* 理论上不会失败，但保留回退逻辑 *)
-             let result = fresh_temp g in
-             emit g (AssignUnOp (result, op, o));
-             result
-         end
-     | _ ->
-         let result = fresh_temp g in
-         emit g (AssignUnOp (result, op, o));
-         result
-     end
-     
+     let result = fresh_temp g in
+     emit g (AssignUnOp (result, op, o));
+     result
  | Ast.ECall (fname, args) ->
      let arg_ops = List.rev (List.map (gen_expr g) args) in
      List.iter (fun a -> emit g (Param a)) arg_ops;
@@ -262,53 +138,41 @@ let rec gen_expr g (e: Ast.expr) : operand =
      emit g (Call (result, fname, List.length args));
      result
 
-(* 生成逻辑与/或的短路求值 TAC 代码，支持常量折叠 *)
-and gen_short_circuit g e1 e2 is_and =
+(* 生成普通二元运算的 TAC 代码（非短路运算） *)
+and gen_normal_binop g op e1 e2 =
  let o1 = gen_expr g e1 in
- 
- (* 检查第一个操作数是否为常量，可以进行常量折叠 *)
- match o1 with
- | Const n ->
-     if is_and then
-       if n = 0 then 
-         (* 0 && x = 0，短路，不需要计算 e2 *)
-         Const 0
-       else 
-         (* 1 && x = x，需要计算 e2 *)
-         gen_expr g e2
-     else
-       if n = 0 then 
-         (* 0 || x = x，需要计算 e2 *)
-         gen_expr g e2
-       else 
-         (* 1 || x = 1，短路，不需要计算 e2 *)
-         Const 1
-     
- | _ ->
-     (* 第一个操作数不是常量，生成标准的短路代码 *)
-     let result = fresh_temp g in
-     let short_l = fresh_label () in
-     let end_l = fresh_label () in
-     
-     emit g (Assign (result, o1));
-     
-     if is_and then
-       emit g (IfNotGoto (result, short_l))
-     else
-       emit g (IfGoto (result, short_l));
-     
-     let o2 = gen_expr g e2 in
-     emit g (Assign (result, o2));
-     emit g (Goto end_l);
-     
-     emit g (Label short_l);
-     let short_val = if is_and then Const 0 else Const 1 in
-     emit g (Assign (result, short_val));
-     
-     emit g (Label end_l);
-     result
+ let o2 = gen_expr g e2 in
+ let result = fresh_temp g in
+ emit g (AssignBinOp (result, op, o1, o2));
+ result
 
-(* ==================== 语句生成 ==================== *)
+(* 生成逻辑与/或的短路求值 TAC 代码 *)
+and gen_short_circuit g e1 e2 is_and =
+ let result = fresh_temp g in
+ let short_l = fresh_label () in
+ let end_l = fresh_label () in
+
+ let o1 = gen_expr g e1 in
+ emit g (Assign (result, o1));
+
+ if is_and then
+   emit g (IfNotGoto (result, short_l))
+ else
+   emit g (IfGoto (result, short_l));
+
+ let o2 = gen_expr g e2 in
+ emit g (Assign (result, o2));
+ emit g (Goto end_l);
+
+ emit g (Label short_l);
+ let short_val = if is_and then Const 0 else Const 1 in
+ emit g (Assign (result, short_val));
+
+ emit g (Label end_l);
+ result
+
+
+(* 语句生成 *)
 
 type loop_labels = {
  break_l: string;
@@ -325,90 +189,43 @@ let rec gen_stmt g (loop: loop_labels option) (s: Ast.stmt) : unit =
  | Ast.SEmpty -> ()
  | Ast.SExpr e -> 
      let _ = gen_expr g e in ()
-     
  | Ast.SDecl (Ast.VarDecl (name, init)) ->
      let t = gen_expr g init in
      let u = bind g name in
-     (* 常量传播：如果是常量赋值，记录到常量环境 *)
-     begin match t with
-     | Const n -> add_const g u n
-     | _ -> ()
-     end;
      emit g (Assign (Var u, t))
-     
  | Ast.SDecl (Ast.ConstDecl (name, init)) ->
      let t = gen_expr g init in
      let u = bind g name in
-     (* 常量声明总是常量 *)
-     begin match t with
-     | Const n -> add_const g u n
-     | _ -> ()  (* 语义分析已确保 const 初始化是常量 *)
-     end;
      emit g (Assign (Var u, t))
-     
  | Ast.SAssign (name, e) ->
      let t = gen_expr g e in
-     let u = resolve_name g name in
-     (* 常量传播：如果是常量赋值，更新常量环境 *)
-     begin match t with
-     | Const n -> add_const g u n
-     | _ -> 
-         (* 如果不是常量，从常量环境中移除（变量不再是常量） *)
-         g.const_env <- List.remove_assoc u g.const_env
-     end;
-     emit g (Assign (Var u, t))
-     
+     emit g (Assign (Var (resolve_name g name), t))
  | Ast.SIf (cond, then_s, else_s) ->
      let else_l = fresh_label () in
      let end_l = fresh_label () in
      let cond_t = gen_expr g cond in
-     
-     (* 检查条件是否为常量，可以进行死代码消除 *)
-     begin match cond_t with
-     | Const 0 ->
-         (* 条件恒为 false，只执行 else 分支 *)
-         Option.iter (gen_stmt g loop) else_s
-     | Const n when n <> 0 ->
-         (* 条件恒为 true，只执行 then 分支 *)
-         gen_stmt g loop then_s
-     | _ ->
-         (* 条件不是常量，生成正常的条件分支 *)
-         emit g (IfNotGoto (cond_t, else_l));
-         gen_stmt g loop then_s;
-         emit g (Goto end_l);
-         emit g (Label else_l);
-         Option.iter (gen_stmt g loop) else_s;
-         emit g (Label end_l)
-     end
-     
+     emit g (IfNotGoto (cond_t, else_l));
+     gen_stmt g loop then_s;
+     emit g (Goto end_l);
+     emit g (Label else_l);
+     Option.iter (gen_stmt g loop) else_s;
+     emit g (Label end_l)
  | Ast.SWhile (cond, body) ->
      let cond_l = fresh_label () in
      let body_l = fresh_label () in
      let end_l = fresh_label () in
      let new_loop = { break_l = end_l; continue_l = cond_l } in
+
      
-     (* 检查循环条件是否为常量 *)
+     emit g (Label cond_l);
      let cond_t = gen_expr g cond in
-     begin match cond_t with
-     | Const 0 ->
-         (* 循环条件恒为 false，不生成循环代码 *)
-         ()
-     | Const n when n <> 0 ->
-         (* 循环条件恒为 true，生成无限循环 *)
-         emit g (Label body_l);
-         gen_stmt g (Some new_loop) body;
-         emit g (Goto body_l);
-         emit g (Label end_l)
-     | _ ->
-         (* 正常循环 *)
-         emit g (Label cond_l);
-         emit g (IfNotGoto (cond_t, end_l));
-         emit g (Label body_l);
-         gen_stmt g (Some new_loop) body;
-         emit g (Goto cond_l);
-         emit g (Label end_l)
-     end
-     
+     emit g (IfNotGoto (cond_t, end_l));
+
+     emit g (Label body_l);
+     gen_stmt g (Some new_loop) body;
+     emit g (Goto cond_l);
+
+     emit g (Label end_l)
  | Ast.SBreak ->
      (match loop with
       | Some l -> emit g (Goto l.break_l)
@@ -423,7 +240,8 @@ let rec gen_stmt g (loop: loop_labels option) (s: Ast.stmt) : unit =
  | Ast.SReturn None ->
      emit g (Return None)
 
-(* ==================== 基本块划分 ==================== *)
+
+(* 基本块划分 *)
 
 (* 将 TAC 指令列表按 Label 划分为基本块列表 *)
 let split_blocks (instrs: tac list) : basic_block list =
@@ -441,7 +259,8 @@ let split_blocks (instrs: tac list) : basic_block list =
  | (Label l) :: rest -> split l [] [] rest
  | _ -> split "entry" [] [] instrs
 
-(* ==================== 函数生成 ==================== *)
+
+(* 函数生成 *)
 
 (* 将 AST 函数定义转换为完整的 IR 函数（含基本块划分） *)
 let gen_func (f: Ast.func_def) : ir_func =
@@ -479,7 +298,8 @@ let gen_func (f: Ast.func_def) : ir_func =
        entry;
        blocks = rest }
 
-(* ==================== 程序生成 ==================== *)
+
+(* 程序生成 *)
 
 (* 编译期常量求值：用于计算全局变量/常量的静态初值（含常量链、算术、比较等） *)
 let eval_binop = Ast.(function
@@ -541,7 +361,239 @@ let generate (prog: Ast.prog) : ir_program =
        Some (GlobalVar (name, v))
  ) prog
 
-(* ==================== 打印 ==================== *)
+
+(* ================================================================
+  常量折叠与传播优化
+  ================================================================ *)
+
+(* 常量值类型 *)
+type const_val = 
+ | ConstInt of int
+ | Unknown
+
+(* 常量环境 *)
+module ConstEnv = Map.Make(String)
+
+(* 从操作数获取常量值 *)
+let operand_to_const env = function
+ | Const n -> Some n
+ | Var name ->
+     begin try 
+       match ConstEnv.find name env with
+       | ConstInt n -> Some n
+       | Unknown -> None
+     with Not_found -> None
+     end
+ | Temp t ->
+     begin try
+       let key = Printf.sprintf "t%d" t in
+       match ConstEnv.find key env with
+       | ConstInt n -> Some n
+       | Unknown -> None
+     with Not_found -> None
+     end
+
+(* 操作数转环境键 *)
+let operand_key = function
+ | Const n -> Printf.sprintf "imm_%d" n
+ | Var s -> s
+ | Temp t -> Printf.sprintf "t%d" t
+
+(* 二元运算常量求值 *)
+let eval_const_binop op a b =
+ match op with
+ | Ast.Add -> Some (a + b)
+ | Ast.Sub -> Some (a - b)
+ | Ast.Mul -> Some (a * b)
+ | Ast.Div -> if b <> 0 then Some (a / b) else None
+ | Ast.Mod -> if b <> 0 then Some (a mod b) else None
+ | Ast.Eq -> Some (if a = b then 1 else 0)
+ | Ast.Ne -> Some (if a <> b then 1 else 0)
+ | Ast.Lt -> Some (if a < b then 1 else 0)
+ | Ast.Gt -> Some (if a > b then 1 else 0)
+ | Ast.Le -> Some (if a <= b then 1 else 0)
+ | Ast.Ge -> Some (if a >= b then 1 else 0)
+ | Ast.And -> Some (if a <> 0 && b <> 0 then 1 else 0)
+ | Ast.Or -> Some (if a <> 0 || b <> 0 then 1 else 0)
+
+(* 一元运算常量求值 *)
+let eval_const_unop op a =
+ match op with
+ | Ast.Pos -> Some a
+ | Ast.Neg -> Some (-a)
+ | Ast.Not -> Some (if a = 0 then 1 else 0)
+
+(* 对单条TAC指令进行常量折叠 *)
+let fold_const_instr env instr =
+ match instr with
+ (* 赋值指令 *)
+ | Assign (dest, src) ->
+     let dest_key = operand_key dest in
+     begin
+       match operand_to_const env src with
+       | Some n ->
+           (* 源是常量，直接折叠 *)
+           (ConstEnv.add dest_key (ConstInt n) env, Assign (dest, Const n))
+       | None ->
+           (ConstEnv.add dest_key Unknown env, instr)
+     end
+
+ (* 二元运算 *)
+ | AssignBinOp (dest, op, src1, src2) ->
+     let dest_key = operand_key dest in
+     begin
+       match operand_to_const env src1, operand_to_const env src2 with
+       | Some a, Some b ->
+           (* 两个操作数都是常量，直接折叠 *)
+           begin
+             match eval_const_binop op a b with
+             | Some n ->
+                 (ConstEnv.add dest_key (ConstInt n) env, Assign (dest, Const n))
+             | None ->
+                 (ConstEnv.add dest_key Unknown env, instr)
+           end
+       | _, _ ->
+           (* 尝试恒等式优化 *)
+           let optimized =
+             match op, src1, src2 with
+             (* x + 0 = x *)
+             | Ast.Add, src, Const 0 -> Some (Assign (dest, src))
+             (* 0 + x = x *)
+             | Ast.Add, Const 0, src -> Some (Assign (dest, src))
+             (* x - 0 = x *)
+             | Ast.Sub, src, Const 0 -> Some (Assign (dest, src))
+             (* x * 1 = x *)
+             | Ast.Mul, src, Const 1 -> Some (Assign (dest, src))
+             (* 1 * x = x *)
+             | Ast.Mul, Const 1, src -> Some (Assign (dest, src))
+             (* x * 0 = 0 *)
+             | Ast.Mul, _, Const 0 -> Some (Assign (dest, Const 0))
+             (* 0 * x = 0 *)
+             | Ast.Mul, Const 0, _ -> Some (Assign (dest, Const 0))
+             (* x / 1 = x *)
+             | Ast.Div, src, Const 1 -> Some (Assign (dest, src))
+             (* x % 1 = 0 *)
+             | Ast.Mod, _, Const 1 -> Some (Assign (dest, Const 0))
+             (* x == x = 1 *)
+             | Ast.Eq, src1, src2 when src1 = src2 -> Some (Assign (dest, Const 1))
+             (* x != x = 0 *)
+             | Ast.Ne, src1, src2 when src1 = src2 -> Some (Assign (dest, Const 0))
+             (* 逻辑与短路 *)
+             | Ast.And, Const 0, _ -> Some (Assign (dest, Const 0))
+             | Ast.And, _, Const 0 -> Some (Assign (dest, Const 0))
+             | Ast.And, Const n, src when n <> 0 -> Some (Assign (dest, src))
+             | Ast.And, src, Const n when n <> 0 -> Some (Assign (dest, src))
+             (* 逻辑或短路 *)
+             | Ast.Or, Const 1, _ -> Some (Assign (dest, Const 1))
+             | Ast.Or, _, Const 1 -> Some (Assign (dest, Const 1))
+             | Ast.Or, Const 0, src -> Some (Assign (dest, src))
+             | Ast.Or, src, Const 0 -> Some (Assign (dest, src))
+             | _ -> None
+           in
+           begin
+             match optimized with
+             | Some new_instr ->
+                 (* 检查优化后的指令是否也是常量 *)
+                 begin
+                   match new_instr with
+                   | Assign (_, src) ->
+                       begin
+                         match operand_to_const env src with
+                         | Some n ->
+                             (ConstEnv.add dest_key (ConstInt n) env, Assign (dest, Const n))
+                         | None ->
+                             (ConstEnv.add dest_key Unknown env, new_instr)
+                       end
+                   | _ ->
+                       (ConstEnv.add dest_key Unknown env, new_instr)
+                 end
+             | None ->
+                 (ConstEnv.add dest_key Unknown env, instr)
+           end
+     end
+
+ (* 一元运算 *)
+ | AssignUnOp (dest, op, src) ->
+     let dest_key = operand_key dest in
+     begin
+       match operand_to_const env src with
+       | Some n ->
+           begin
+             match eval_const_unop op n with
+             | Some n' ->
+                 (ConstEnv.add dest_key (ConstInt n') env, Assign (dest, Const n'))
+             | None ->
+                 (ConstEnv.add dest_key Unknown env, instr)
+           end
+       | None ->
+           (ConstEnv.add dest_key Unknown env, instr)
+     end
+
+ (* 条件跳转：常量条件可以简化 *)
+ | IfGoto (cond, label) ->
+     begin
+       match operand_to_const env cond with
+       | Some n ->
+           if n = 0 then
+             (* 条件为假，删除跳转 *)
+             (env, Empty)
+           else
+             (* 条件为真，替换为无条件跳转 *)
+             (env, Goto label)
+       | None ->
+           (env, instr)
+     end
+
+ | IfNotGoto (cond, label) ->
+     begin
+       match operand_to_const env cond with
+       | Some n ->
+           if n <> 0 then
+             (* 条件为真，删除跳转 *)
+             (env, Empty)
+           else
+             (* 条件为假，替换为无条件跳转 *)
+             (env, Goto label)
+       | None ->
+           (env, instr)
+     end
+
+ (* 其他指令保持不变 *)
+ | _ -> (env, instr)
+
+(* 对整个指令列表进行常量折叠 *)
+let fold_constants (instrs: tac list) : tac list =
+ let env = ref ConstEnv.empty in
+ let result = ref [] in
+ 
+ List.iter (fun instr ->
+   let new_env, new_instr = fold_const_instr !env instr in
+   env := new_env;
+   if new_instr <> Empty then
+     result := new_instr :: !result
+ ) instrs;
+ 
+ List.rev !result
+
+(* 对基本块进行常量折叠 *)
+let fold_constants_block (block: basic_block) : basic_block =
+ { block with instrs = fold_constants block.instrs }
+
+(* 对整个IR函数进行常量折叠优化 *)
+let optimize_constants_func (f: ir_func) : ir_func =
+ let entry = fold_constants_block f.entry in
+ let blocks = List.map fold_constants_block f.blocks in
+ { f with entry; blocks }
+
+(* 对IR程序进行常量折叠优化 *)
+let optimize_constants (prog: ir_program) : ir_program =
+ List.map (function
+   | Function f -> Function (optimize_constants_func f)
+   | GlobalVar _ as g -> g
+ ) prog
+
+
+(* 打印 *)
 
 (* 将操作数（Const/Var/Temp）转换为字符串 *)
 let op_str = function
@@ -576,6 +628,7 @@ let tac_str = function
  | Call (x, f, n) -> Printf.sprintf "%s = call %s, %d" (op_str x) f n
  | Return (Some x) -> "return " ^ op_str x
  | Return None -> "return"
+ | Empty -> ""
 
 (* 打印一个基本块的标签及其所有指令 *)
 let dump_block b =
