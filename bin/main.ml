@@ -27,14 +27,14 @@ let () =
 
     | Ok ir ->
         (* 如果优化启用，打印优化后的IR到stderr用于调试 *)
-        if !optimize then (
+        (* if !optimize then (
           Printf.eprintf "\n=== Optimized IR ===\n";
           Lib.Ir.dump_ir ir
-        );
+        ); *)
         (* 直接调用汇编代码生成器 *)
         Lib.Codegen.generate_riscv ir
     );
-
+  
   with
   | Lib.Lexer.Error msg ->
       Printf.fprintf stderr "Lexical error: %s\n" msg; exit 1

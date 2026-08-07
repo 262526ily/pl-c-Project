@@ -1,28 +1,3 @@
-
-func main():
-  locals: [i$13, sum$12, result$4]
-  temps: 15
-
-entry:
-  goto L1
-L0:
-  t8 = result$4 + 555
-  result$4 = t8
-L1:
-L2:
-  t9 = i$13 < 3
-  ifFalse t9 goto L4
-L3:
-  t10 = sum$12 + i$13
-  sum$12 = t10
-  t11 = i$13 * 10
-  t12 = i$13 + 1
-  i$13 = t12
-  goto L2
-L4:
-  t13 = result$4 + sum$12
-  result$4 = t13
-  return result$4
     .text
 
     .text
