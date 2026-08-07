@@ -4,7 +4,10 @@ let () =
   let optimize = ref false in
   let args = Array.to_list Sys.argv in
   List.iter (fun arg ->
-    if arg = "-opt" then optimize := true
+    if arg = "-opt" then (
+      optimize := true;
+      Printf.eprintf "=== Optimization ENABLED ===\n"
+    )
   ) args;
   
   try
@@ -23,6 +26,11 @@ let () =
         exit 1
 
     | Ok ir ->
+        (* 如果优化启用，打印优化后的IR到stderr用于调试 *)
+        if !optimize then (
+          Printf.eprintf "\n=== Optimized IR ===\n";
+          Lib.Ir.dump_ir ir
+        );
         (* 直接调用汇编代码生成器 *)
         Lib.Codegen.generate_riscv ir
     );

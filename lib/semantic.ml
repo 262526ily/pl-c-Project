@@ -161,7 +161,7 @@
                  if expected_args <> actual_args then
                    add_err st (ArgCountMismatch (fname, expected_args, actual_args))
              | _ -> 
-                 add_err st (NotAFunction fname));   (* FIX: 用 NotAFunction 替代 UndeclaredVar *)
+                 add_err st (NotAFunction fname));
             List.iter (check_expr st) args)
  
  
@@ -357,7 +357,7 @@
    if errs = [] then
      let ir = Ir.generate prog in
      if optimize then
-       Ok (Ir.optimize_constants ir)  (* 应用常量折叠优化 *)
+       Ok (Ir.optimize_program ir)  (* 使用完整优化流水线：常量折叠 + 死代码删除 *)
      else
        Ok ir
    else
