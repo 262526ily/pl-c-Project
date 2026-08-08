@@ -643,34 +643,38 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
     | _ -> ()
   ) prog;
   
-  (* 简化：当左操作数是常量时 *)
+  (* 简化：当左操作数是常量时 - 直接返回简化后的 operand *)
   let simplify_with_const_left op const_val right =
     match op, const_val with
-    | Ast.Add, 0 -> Some (Assign (Temp (-1), right))
-    | Ast.Sub, 0 -> Some (AssignUnOp (Temp (-1), Ast.Neg, right))
-    | Ast.Mul, 0 -> Some (Assign (Temp (-1), Const 0))
-    | Ast.Mul, 1 -> Some (Assign (Temp (-1), right))
-    | Ast.Div, 0 -> None
-    | Ast.And, 0 -> Some (Assign (Temp (-1), Const 0))
-    | Ast.And, 1 -> Some (Assign (Temp (-1), right))
-    | Ast.Or, 0 -> Some (Assign (Temp (-1), right))
-    | Ast.Or, 1 -> Some (Assign (Temp (-1), Const 1))
+    | Ast.Add, 0 -> Some right   (* 0 + right = right *)
+    | Ast.Sub, 0 -> 
+        (* 0 - right = -right，需要用 AssignUnOp *)
+        (* 但我们不能在这里返回 UnOp，因为需要的是 operand *)
+        (* 所以返回 None，让 fold_one_tac 处理 *)
+        None
+    | Ast.Mul, 0 -> Some (Const 0)  (* 0 * right = 0 *)
+    | Ast.Mul, 1 -> Some right   (* 1 * right = right *)
+    | Ast.Div, 0 -> None  (* 0 / right = 0，但 right 可能为 0，保留 *)
+    | Ast.And, 0 -> Some (Const 0)  (* 0 && right = 0 *)
+    | Ast.And, 1 -> Some right   (* 1 && right = right *)
+    | Ast.Or, 0 -> Some right    (* 0 || right = right *)
+    | Ast.Or, 1 -> Some (Const 1)   (* 1 || right = 1 *)
     | _ -> None
   in
   
   (* 简化：当右操作数是常量时 *)
   let simplify_with_const_right op left const_val =
     match op, const_val with
-    | Ast.Add, 0 -> Some (Assign (Temp (-1), left))
-    | Ast.Sub, 0 -> Some (Assign (Temp (-1), left))
-    | Ast.Mul, 0 -> Some (Assign (Temp (-1), Const 0))
-    | Ast.Mul, 1 -> Some (Assign (Temp (-1), left))
-    | Ast.Div, 1 -> Some (Assign (Temp (-1), left))
-    | Ast.Mod, 1 -> Some (Assign (Temp (-1), Const 0))
-    | Ast.And, 0 -> Some (Assign (Temp (-1), Const 0))
-    | Ast.And, 1 -> Some (Assign (Temp (-1), left))
-    | Ast.Or, 0 -> Some (Assign (Temp (-1), left))
-    | Ast.Or, 1 -> Some (Assign (Temp (-1), Const 1))
+    | Ast.Add, 0 -> Some left    (* left + 0 = left *)
+    | Ast.Sub, 0 -> Some left    (* left - 0 = left *)
+    | Ast.Mul, 0 -> Some (Const 0)  (* left * 0 = 0 *)
+    | Ast.Mul, 1 -> Some left    (* left * 1 = left *)
+    | Ast.Div, 1 -> Some left    (* left / 1 = left *)
+    | Ast.Mod, 1 -> Some (Const 0)  (* left % 1 = 0 *)
+    | Ast.And, 0 -> Some (Const 0)  (* left && 0 = 0 *)
+    | Ast.And, 1 -> Some left    (* left && 1 = left *)
+    | Ast.Or, 0 -> Some left     (* left || 0 = left *)
+    | Ast.Or, 1 -> Some (Const 1)   (* left || 1 = 1 *)
     | _ -> None
   in
   
@@ -687,11 +691,9 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
     match op with
     | Const n -> Some n
     | Var name -> 
-        (* 先检查全局常量 *)
         if StringMap.mem name !const_env then
           Some (StringMap.find name !const_env)
         else
-          (* 再检查局部常量 *)
           StringMap.find_opt name !local_consts
     | Temp n -> 
         let key = "t" ^ string_of_int n in
@@ -722,14 +724,11 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
   let fold_with_propagation inst =
     match inst with
     | Assign (x, y) ->
-        (* 检查 y 是否为已知常量 *)
         (match get_const_value y with
          | Some n ->
-             (* y 是常量，直接赋值常量给 x *)
              set_local_const x n;
              Some (Assign (x, Const n))
          | None ->
-             (* 清除 x 的常量状态（被重新赋值） *)
              clear_const x;
              fold_one_tac inst)
     
@@ -738,7 +737,6 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
         let z_const = get_const_value z in
         (match y_const, z_const with
          | Some n1, Some n2 ->
-             (* 两个操作数都是常量，直接计算 *)
              (match eval_binop_const op n1 n2 with
               | Some result ->
                   set_local_const x result;
@@ -747,29 +745,22 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
                   clear_const x;
                   fold_one_tac inst)
          | Some n1, None ->
-             (* y 是常量，z 不是：尝试简化 *)
              (match simplify_with_const_left op n1 z with
               | Some simplified ->
-                  (match simplified with
-                   | Assign (_, Const n) -> set_local_const x n
-                   | _ -> clear_const x);
-                  fold_one_tac simplified
+                  clear_const x;
+                  Some (Assign (x, simplified))
               | None ->
                   clear_const x;
                   fold_one_tac inst)
          | None, Some n2 ->
-             (* y 不是常量，z 是常量 *)
              (match simplify_with_const_right op y n2 with
               | Some simplified ->
-                  (match simplified with
-                   | Assign (_, Const n) -> set_local_const x n
-                   | _ -> clear_const x);
-                  fold_one_tac simplified
+                  clear_const x;
+                  Some (Assign (x, simplified))
               | None ->
                   clear_const x;
                   fold_one_tac inst)
          | None, None ->
-             (* 两个都不是常量 *)
              clear_const x;
              fold_one_tac inst)
     
@@ -788,7 +779,6 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
              fold_one_tac inst)
     
     | Call (dest, _, _) ->
-        (* 函数调用结果不可预测，清除常量状态 *)
         clear_const dest;
         fold_one_tac inst
     
@@ -807,7 +797,6 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
   
   (* 优化函数 *)
   let fold_func (f: ir_func) : ir_func =
-    (* 每次处理函数时重置局部常量环境 *)
     local_consts := StringMap.empty;
     { f with
       entry = fold_block f.entry;
