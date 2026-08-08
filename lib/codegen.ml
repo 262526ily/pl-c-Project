@@ -16,7 +16,80 @@ let rec split_at n = function
       let prefix, suffix = split_at (n - 1) xs in
       x :: prefix, suffix
 
+(* ============================================================ *)
+(* 安全的偏移量查找 *)
+
+let find_offset map op =
+  match Hashtbl.find_opt map op with
+  | Some off -> off
+  | None ->
+      match op with
+      | Var name ->
+          Printf.eprintf "Warning: Variable '%s' not found in offset map, treating as global\n" name;
+          -1  (* 返回 -1 表示全局变量 *)
+      | Temp t ->
+          Printf.eprintf "Fatal: Temp %d not found in offset map\n" t;
+          exit 1
+      | Const _ ->
+          Printf.eprintf "Fatal: Const should not be in offset map\n";
+          exit 1
+
+let has_offset map op =
+  match op with
+  | Var name -> Hashtbl.mem map (Var name)
+  | Temp t -> Hashtbl.mem map (Temp t)
+  | Const _ -> false
+
+(* ============================================================ *)
+(* 安全加载操作数 *)
+
+let load_op reg op map =
+  match op with
+  | Const n ->
+      Printf.printf "    li %s, %d\n" reg n
+  | Temp t ->
+      if Hashtbl.mem map (Temp t) then
+        let off = Hashtbl.find map (Temp t) in
+        Printf.printf "    lw %s, %d(fp)\n" reg off
+      else (
+        Printf.eprintf "ERROR: Temp %d not found in offset map\n" t;
+        exit 1
+      )
+  | Var name ->
+      if Hashtbl.mem map (Var name) then
+        let off = Hashtbl.find map (Var name) in
+        Printf.printf "    lw %s, %d(fp)\n" reg off
+      else
+        (* 找不到说明是全局变量 *)
+        (Printf.printf "    la %s, %s\n" reg name;
+         Printf.printf "    lw %s, 0(%s)\n" reg reg)
+
+(* ============================================================ *)
+(* 安全存储操作数 *)
+
+let store_op reg op map =
+  match op with
+  | Const _ -> () (* 常量不可作为左值 *)
+  | Temp t ->
+      if Hashtbl.mem map (Temp t) then
+        let off = Hashtbl.find map (Temp t) in
+        Printf.printf "    sw %s, %d(fp)\n" reg off
+      else (
+        Printf.eprintf "ERROR: Temp %d not found in offset map for store\n" t;
+        exit 1
+      )
+  | Var name ->
+      if Hashtbl.mem map (Var name) then
+        let off = Hashtbl.find map (Var name) in
+        Printf.printf "    sw %s, %d(fp)\n" reg off
+      else
+        (* 全局变量写回 *)
+        (Printf.printf "    la t3, %s\n" name;
+         Printf.printf "    sw %s, 0(t3)\n" reg)
+
+(* ============================================================ *)
 (* 计算栈槽偏移量映射表 *)
+
 let compute_offsets (f: ir_func) =
   let local_slots = ref 0 in
   let map = Hashtbl.create 32 in
@@ -48,40 +121,9 @@ let compute_offsets (f: ir_func) =
   
   (!local_slots, map)
 
-(* 将操作数的值加载到目标寄存器 *)
-let load_op reg op map =
-  match op with
-  | Const n ->
-      Printf.printf "    li %s, %d\n" reg n
-  | Temp t ->
-      let off = Hashtbl.find map (Temp t) in
-      Printf.printf "    lw %s, %d(fp)\n" reg off
-  | Var name ->
-      if Hashtbl.mem map (Var name) then
-        let off = Hashtbl.find map (Var name) in
-        Printf.printf "    lw %s, %d(fp)\n" reg off
-      else
-        (* 找不到说明是全局变量 *)
-        (Printf.printf "    la %s, %s\n" reg name;
-         Printf.printf "    lw %s, 0(%s)\n" reg reg)
-
-(* 将寄存器中的值写回到操作数对应的栈槽中 *)
-let store_op reg op map =
-  match op with
-  | Const _ -> () (* 常量不可作为左值 *)
-  | Temp t ->
-      let off = Hashtbl.find map (Temp t) in
-      Printf.printf "    sw %s, %d(fp)\n" reg off
-  | Var name ->
-      if Hashtbl.mem map (Var name) then
-        let off = Hashtbl.find map (Var name) in
-        Printf.printf "    sw %s, %d(fp)\n" reg off
-      else
-        (* 全局变量写回 *)
-        (Printf.printf "    la t3, %s\n" name;
-         Printf.printf "    sw %s, 0(t3)\n" reg)
-
+(* ============================================================ *)
 (* 翻译单条 TAC 指令 *)
+
 let emit_tac fname tac_inst map current_args =
   match tac_inst with
   | Assign (x, y) ->
@@ -209,7 +251,7 @@ let emit_tac fname tac_inst map current_args =
            Printf.printf "%s:\n" lbl_finish;
            (* RV32I 内联除法/取模结束 --- *)
            
-           (* 根据 TAC 操作码，决定把“商”还是“余数”写回内存 *)
+           (* 根据 TAC 操作码，决定把"商"还是"余数"写回内存 *)
            if op = Ast.Div then
              store_op "t2" x map                    (* t2 存的是商 *)
            else
@@ -234,28 +276,6 @@ let emit_tac fname tac_inst map current_args =
            );
            store_op "t0" x map)
 
-  (* 支持M扩展时启用 *)
-  (*
-  | AssignBinOp (x, op, y, z) ->
-      load_op "t0" y map;
-      load_op "t1" z map;
-      (match op with
-       | Ast.Add -> Printf.printf "    add t0, t0, t1\n"
-       | Ast.Sub -> Printf.printf "    sub t0, t0, t1\n"
-       | Ast.Mul -> Printf.printf "    mul t0, t0, t1\n"
-       | Ast.Div -> Printf.printf "    div t0, t0, t1\n"
-       | Ast.Mod -> Printf.printf "    rem t0, t0, t1\n"
-       | Ast.Eq  -> Printf.printf "    sub t0, t0, t1\n    seqz t0, t0\n"
-       | Ast.Ne  -> Printf.printf "    sub t0, t0, t1\n    snez t0, t0\n"
-       | Ast.Lt  -> Printf.printf "    slt t0, t0, t1\n"
-       | Ast.Gt  -> Printf.printf "    slt t0, t1, t0\n"
-       | Ast.Le  -> Printf.printf "    slt t0, t1, t0\n    xori t0, t0, 1\n"
-       | Ast.Ge  -> Printf.printf "    slt t0, t0, t1\n    xori t0, t0, 1\n"
-       | Ast.And -> Printf.printf "    and t0, t0, t1\n"
-       | Ast.Or  -> Printf.printf "    or t0, t0, t1\n");
-      store_op "t0" x map
-  *)
-
   | AssignUnOp (x, op, y) ->
       load_op "t0" y map;
       (match op with
@@ -276,7 +296,6 @@ let emit_tac fname tac_inst map current_args =
       Printf.printf "    beqz t0, %s\n" l
 
   | Label l ->
-      (* 基本块外部有单独标签逻辑，通常 TAC 中的 Label 可在此打印或被块接管 *)
       Printf.printf "%s:\n" l
 
   | Param x ->
@@ -285,7 +304,6 @@ let emit_tac fname tac_inst map current_args =
   | Call (dest, callee, nargs) ->
       let call_args, rem = split_at nargs !current_args in
       current_args := rem;
-      (* FIX: Params 累积时已是源码顺序（首个参数在头），不要再反转 *)
       let args = call_args in
       
       (* 如果调用的函数参数超过 8 个，需要为其在 sp 低位开辟动态传参空间 *)
@@ -319,12 +337,16 @@ let emit_tac fname tac_inst map current_args =
   | Return None ->
       Printf.printf "    j .L_epilogue_%s\n" fname
 
+(* ============================================================ *)
 (* 翻译单个基本块 *)
+
 let emit_block fname (b: basic_block) map current_args =
   Printf.printf "%s:\n" b.label;
   List.iter (fun inst -> emit_tac fname inst map current_args) b.instrs
 
+(* ============================================================ *)
 (* 翻译单个函数 *)
+
 let emit_function (f: ir_func) =
   let slots, map = compute_offsets f in
   (* 计算对齐 16 字节后的帧大小（8 字节用于保存 ra 和 fp） *)
@@ -358,7 +380,9 @@ let emit_function (f: ir_func) =
   Printf.printf "    addi sp, sp, %d\n" framesize;
   Printf.printf "    ret\n\n"
 
+(* ============================================================ *)
 (* 整个程序的代码生成主入口点 *)
+
 let generate_riscv (prog: ir_program) =
   (* 打印全局段声明 *)
   Printf.printf "    .text\n\n";

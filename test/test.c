@@ -1,11 +1,19 @@
-// test_const_fold.tc
-const int A = 10;
-const int B = 20;
+// fib.tc
+int fib(int n) {
+    int a = 0;
+    int b = 1;
+    int i = 0;
+    int temp = 0;
+    while (i < n) {
+        temp = a + b;
+        a = b;
+        b = temp;
+        i = i + 1;
+    }
+    return a;
+}
 
 int main() {
-    int x = A + B;
-    int y = x * 2;
-    int z = y - 30;
-    int w = z / 3;
-    return w;
+    int result = fib(5);
+    return result;
 }
