@@ -1,6 +1,25 @@
     .text
 
     .text
+    .globl mod_small
+mod_small:
+    addi sp, sp, -16
+    sw ra, 12(sp)
+    sw fp, 8(sp)
+    addi fp, sp, 16
+    sw a0, -12(fp)
+    lw t0, -12(fp)
+    andi t0, t0, 63
+    sw t0, -16(fp)
+    lw a0, -16(fp)
+    j .L_epilogue_mod_small
+.L_epilogue_mod_small:
+    lw ra, -4(fp)
+    lw fp, -8(fp)
+    addi sp, sp, 16
+    ret
+
+    .text
     .globl mod_large
 mod_large:
     addi sp, sp, -16
@@ -9,7 +28,8 @@ mod_large:
     addi fp, sp, 16
     sw a0, -12(fp)
     lw t0, -12(fp)
-    andi t0, t0, 4095
+    li t1, 4095
+    and t0, t0, t1
     sw t0, -16(fp)
     lw a0, -16(fp)
     j .L_epilogue_mod_large
@@ -20,27 +40,8 @@ mod_large:
     ret
 
     .text
-    .globl mod_huge
-mod_huge:
-    addi sp, sp, -16
-    sw ra, 12(sp)
-    sw fp, 8(sp)
-    addi fp, sp, 16
-    sw a0, -12(fp)
-    lw t0, -12(fp)
-    andi t0, t0, 32767
-    sw t0, -16(fp)
-    lw a0, -16(fp)
-    j .L_epilogue_mod_huge
-.L_epilogue_mod_huge:
-    lw ra, -4(fp)
-    lw fp, -8(fp)
-    addi sp, sp, 16
-    ret
-
-    .text
-    .globl mul_large
-mul_large:
+    .globl mod_runtime
+mod_runtime:
     addi sp, sp, -32
     sw ra, 28(sp)
     sw fp, 24(sp)
@@ -49,11 +50,11 @@ mul_large:
     sw a1, -16(fp)
     lw t0, -12(fp)
     lw t1, -16(fp)
-    mul t0, t0, t1
+    rem t0, t0, t1
     sw t0, -20(fp)
     lw a0, -20(fp)
-    j .L_epilogue_mul_large
-.L_epilogue_mul_large:
+    j .L_epilogue_mod_runtime
+.L_epilogue_mod_runtime:
     lw ra, -4(fp)
     lw fp, -8(fp)
     addi sp, sp, 32
@@ -69,18 +70,18 @@ main:
     li t0, 5000
     sw t0, -24(fp)
     lw a0, -24(fp)
-    call mod_large
+    call mod_small
     sw a0, -28(fp)
     lw t0, -28(fp)
     sw t0, -20(fp)
     lw a0, -24(fp)
-    call mod_huge
+    call mod_large
     sw a0, -32(fp)
     lw t0, -32(fp)
     sw t0, -16(fp)
-    li a0, 1000
-    li a1, 2000
-    call mul_large
+    lw a0, -24(fp)
+    li a1, 7
+    call mod_runtime
     sw a0, -36(fp)
     lw t0, -36(fp)
     sw t0, -12(fp)

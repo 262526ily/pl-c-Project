@@ -1,30 +1,27 @@
 
 // ============================================================
-// 测试程序：验证大数运算优化
-// 
-// 测试场景：
-//   1. 大数乘法 (结果超过 32 位？)
-//   2. 大掩码取模 (mask > 2047)
-//   3. 大数除法
-//   4. 混合运算
+// 测试：同时检测小掩码和大掩码取模优化
 // ============================================================
 
+// 小掩码 (<= 2047)：应该用 andi
+int mod_small(int x) {
+    return x % 64;        // mask = 63
+}
+
+// 大掩码 (> 2047)：应该用 li + and
 int mod_large(int x) {
-    return x % 4096;        // mask = 4095 (> 2047)
+    return x % 4096;      // mask = 4095
 }
 
-int mod_huge(int x) {
-    return x % 32768;       // mask = 32767 (> 2047)
-}
-
-int mul_large(int a, int b) {
-    return a * b;           // 大数乘法
+// 运行时取模：应该用 rem
+int mod_runtime(int a, int b) {
+    return a % b;
 }
 
 int main() {
     int x = 5000;
-    int a = mod_large(x);    // 5000 % 4096 = 904
-    int b = mod_huge(x);     // 5000 % 32768 = 5000
-    int c = mul_large(1000, 2000);  // 2,000,000
-    return a + b + c;        // 904 + 5000 + 2000000 = 2,005,904
+    int a = mod_small(x);     // 5000 % 64 = 8
+    int b = mod_large(x);     // 5000 % 4096 = 904
+    int c = mod_runtime(x, 7); // 5000 % 7 = 2
+    return a + b + c;         // 8 + 904 + 2 = 914
 }

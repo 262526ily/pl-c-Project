@@ -34,6 +34,9 @@ let log2 n =
   in
   if n <= 0 then 0 else loop n 0
 
+(* 检查立即数是否在 12 位范围内 *)
+let is_imm12 n = n >= -2048 && n <= 2047
+
 (* ============================================================ *)
 (* 安全的偏移量查找 *)
 
@@ -214,7 +217,13 @@ let emit_mod x y z map =
       Printf.printf "    li t0, 0\n"
     else if is_power_of_two n then
       let mask = n - 1 in
-      Printf.printf "    andi t0, t0, %d\n" mask
+      if is_imm12 mask then
+        (* 小掩码：用 andi（一条指令） *)
+        Printf.printf "    andi t0, t0, %d\n" mask
+      else
+        (* 大掩码：用 li + and（两条指令） *)
+        (Printf.printf "    li t1, %d\n" mask;
+         Printf.printf "    and t0, t0, t1\n")
     else
       (load_op "t1" z map;
        Printf.printf "    rem t0, t0, t1\n")
