@@ -924,21 +924,21 @@ let optimize_function (f: ir_func) : ir_func =
  
  (* 打印一个基本块的标签及其所有指令 *)
  let dump_block b =
-   Printf.printf "%s:\n" b.label;
-   List.iter (fun i -> Printf.printf "  %s\n" (tac_str i)) b.instrs
+   Printf.eprintf "%s:\n" b.label;
+   List.iter (fun i -> Printf.eprintf "  %s\n" (tac_str i)) b.instrs
  
  (* 打印一个 IR 函数的完整信息（参数、局部变量、基本块） *)
  let dump_func f =
-   Printf.printf "\nfunc %s(%s):\n" f.fname (String.concat ", " f.params);
-   Printf.printf "  locals: [%s]\n" (String.concat ", " f.locals);
-   Printf.printf "  temps: %d\n\n" f.temps;
+   Printf.eprintf "\nfunc %s(%s):\n" f.fname (String.concat ", " f.params);
+   Printf.eprintf "  locals: [%s]\n" (String.concat ", " f.locals);
+   Printf.eprintf "  temps: %d\n\n" f.temps;
    dump_block f.entry;
    List.iter dump_block f.blocks
  
  (* 打印整个 IR 程序（全局变量和所有函数） *)
  let dump_ir prog =
    List.iter (function
-     | GlobalVar (name, Some v) -> Printf.printf "global %s = %d\n" name v
-     | GlobalVar (name, None) -> Printf.printf "global %s\n" name
+     | GlobalVar (name, Some v) -> Printf.eprintf "global %s = %d\n" name v
+     | GlobalVar (name, None) -> Printf.eprintf "global %s\n" name
      | Function f -> dump_func f
    ) prog
