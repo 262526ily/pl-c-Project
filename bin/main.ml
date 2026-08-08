@@ -6,7 +6,7 @@ let () =
   List.iter (fun arg ->
     if arg = "-opt" then (
       optimize := true;
-      Printf.eprintf "=== Optimization ENABLED ===\n"
+      (* Printf.eprintf "=== Optimization ENABLED ===\n" *)
     )
   ) args;
   
