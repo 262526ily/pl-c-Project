@@ -609,7 +609,7 @@
      | IfGoto (cond, _) -> mark_used cond
      | IfNotGoto (cond, _) -> mark_used cond
      | Param x -> mark_used x
-     | Call (dest, _, _) -> mark_used dest
+     | Call (dest, _, _) -> mark_used dest  (* 标记返回值被使用 *)
      | Return (Some x) -> mark_used x
      | Goto _ | Label _ | Return None -> ()
      | Empty -> ()
@@ -637,6 +637,7 @@
    | AssignBinOp (dest, _, _, _) -> Some (operand_key dest)
    | AssignUnOp (dest, _, _) -> Some (operand_key dest)
    | Call (dest, _, _) -> Some (operand_key dest)
+   | Empty -> None
    | _ -> None
  
  (* 收集所有跳转目标标签 *)
@@ -655,7 +656,7 @@
    ) instrs;
    !used
  
- (* 标记可达的基本块 - 从 entry 开始遍历 *)
+ (* 标记可达的基本块 - 从 entry 开始遍历，不自动添加未使用的标签 *)
  let mark_reachable_blocks instrs =
    let reachable = ref [] in
    
@@ -691,13 +692,7 @@
    (* 从 entry 标签开始遍历 *)
    visit "entry";
    
-   (* 如果某个标签没有被标记但被使用了，也标记它（保守策略） *)
-   let used_labels = collect_used_labels instrs in
-   List.iter (fun l ->
-     if List.mem l used_labels && not (List.mem l !reachable) then
-       reachable := l :: !reachable
-   ) used_labels;
-   
+   (* 只保留从 entry 可达的标签，不自动添加未使用的标签 *)
    !reachable
  
  (* 查找指令序列中最后一个 Return 的位置 *)
@@ -724,40 +719,44 @@
      in
      filter_idx 0 instrs
  
- (* 删除空标签块 *)
-let remove_empty_blocks instrs reachable =
-    let rec clean = function
-      | [] -> []
-      | Label l :: rest ->
-          if List.mem l reachable then
-            (* 检查该标签后的内容（直到下一个标签或结束） *)
-            let rec block_content = function
-              | [] -> []
-              | Label _ :: _ -> []
-              | instr :: rest' -> instr :: block_content rest'
-            in
-            let content = block_content rest in
-            if content = [] then
-              (* 空标签块，删除标签和后续内容（如果有） *)
-              let rec skip_to_next_label = function
-                | [] -> []
-                | (Label _) :: rest' -> rest'
-                | _ :: rest' -> skip_to_next_label rest'
-              in
-              clean (skip_to_next_label rest)
-            else
-              Label l :: clean rest
-          else
-            (* 不可达标签，删除 *)
-            let rec skip_to_next_label = function
-              | [] -> []
-              | (Label _) :: rest' -> rest'
-              | _ :: rest' -> skip_to_next_label rest'
-            in
-            clean (skip_to_next_label rest)
-      | instr :: rest -> instr :: clean rest
-    in
-    clean instrs
+ (* 删除空标签块和只包含 Empty 指令的块 *)
+ let remove_empty_blocks instrs reachable =
+   let rec clean = function
+     | [] -> []
+     | Label l :: rest ->
+         if List.mem l reachable then
+           (* 检查该标签后的内容（直到下一个标签或结束） *)
+           let rec block_content = function
+             | [] -> []
+             | Label _ :: _ -> []
+             | instr :: rest' -> instr :: block_content rest'
+           in
+           let content = block_content rest in
+           (* 检查是否为空或只包含 Empty 指令 *)
+           let is_empty_or_empty_only =
+             content = [] || List.for_all (function Empty -> true | _ -> false) content
+           in
+           if is_empty_or_empty_only then
+             (* 空标签块，删除标签和后续内容（如果有） *)
+             let rec skip_to_next_label = function
+               | [] -> []
+               | (Label _) :: rest' -> rest'
+               | _ :: rest' -> skip_to_next_label rest'
+             in
+             clean (skip_to_next_label rest)
+           else
+             Label l :: clean rest
+         else
+           (* 不可达标签，删除 *)
+           let rec skip_to_next_label = function
+             | [] -> []
+             | (Label _) :: rest' -> rest'
+             | _ :: rest' -> skip_to_next_label rest'
+           in
+           clean (skip_to_next_label rest)
+     | instr :: rest -> instr :: clean rest
+   in
+   clean instrs
  
  (* 主要死代码删除函数 - 增强版 *)
  let dead_code_elimination (instrs: tac list) : tac list =
@@ -794,9 +793,22 @@ let remove_empty_blocks instrs reachable =
      ) after_removal in
      
      (* 第五步：删除空标签块和不可达标签块 *)
-     let cleaned = remove_empty_blocks filtered reachable in
+     let cleaned1 = remove_empty_blocks filtered reachable in
      
-     cleaned
+     (* 第六步：再次检查未使用的变量（因为删除标签后可能有新的未使用变量） *)
+     let used_vars2 = collect_used_vars cleaned1 in
+     let final = List.filter (fun instr ->
+       match defined_var instr with
+       | Some var ->
+           if List.mem var used_vars2 then
+             true
+           else
+             has_side_effect instr
+       | None ->
+           has_side_effect instr
+     ) cleaned1 in
+     
+     final
  
  (* 对基本块进行死代码删除 *)
  let dead_code_elimination_block (block: basic_block) : basic_block =
@@ -808,43 +820,52 @@ let remove_empty_blocks instrs reachable =
    let new_locals = List.filter (fun v -> List.mem v used_vars) f.locals in
    { f with locals = new_locals }
  
- (* 对整个IR函数进行完整优化（常量折叠 + 死代码删除） *)
-let optimize_function (f: ir_func) : ir_func =
-    Printf.eprintf "Optimizing function: %s\n" f.fname;
-    
-    let count_instrs (func: ir_func) =
-      List.length func.entry.instrs + 
-      List.fold_left (fun acc (b: basic_block) -> acc + List.length b.instrs) 0 func.blocks
-    in
-    
-    let before_count = count_instrs f in
-    
-    (* 第一步：常量折叠 *)
-    let entry_folded = fold_constants_block f.entry in
-    let blocks_folded = List.map fold_constants_block f.blocks in
-    let f_folded = { f with entry = entry_folded; blocks = blocks_folded } in
-    
-    (* 第二步：死代码删除 *)
-    let entry_dce = dead_code_elimination_block f_folded.entry in
-    let blocks_dce = List.map dead_code_elimination_block f_folded.blocks in
-    let f_dce = { f_folded with entry = entry_dce; blocks = blocks_dce } in
-    
-    (* 第三步：清理未使用的局部变量 *)
-    let all_instrs = 
-      let instrs1 = entry_dce.instrs in
-      let instrs2 = List.fold_left (fun acc (b: basic_block) -> acc @ b.instrs) [] blocks_dce in
-      instrs1 @ instrs2
-    in
-    let f_cleaned = clean_locals f_dce all_instrs in
-    
-    let after_count = count_instrs f_cleaned in
-    
-    if before_count > after_count then
-      Printf.eprintf "  Removed %d instructions (%d -> %d, reduced %.1f%%)\n" 
-        (before_count - after_count) before_count after_count
-        (float_of_int (before_count - after_count) *. 100.0 /. float_of_int before_count);
-    
-    f_cleaned
+ (* 对整个IR函数进行完整优化（常量折叠 + 死代码删除 + 再次优化） *)
+ let optimize_function (f: ir_func) : ir_func =
+   Printf.eprintf "Optimizing function: %s\n" f.fname;
+   
+   let count_instrs (func: ir_func) =
+     List.length func.entry.instrs + 
+     List.fold_left (fun acc (b: basic_block) -> acc + List.length b.instrs) 0 func.blocks
+   in
+   
+   let before_count = count_instrs f in
+   
+   (* 第一次优化：常量折叠 + 死代码删除 *)
+   let entry_folded = fold_constants_block f.entry in
+   let blocks_folded = List.map fold_constants_block f.blocks in
+   let f_folded = { f with entry = entry_folded; blocks = blocks_folded } in
+   
+   let entry_dce = dead_code_elimination_block f_folded.entry in
+   let blocks_dce = List.map dead_code_elimination_block f_folded.blocks in
+   let f_dce = { f_folded with entry = entry_dce; blocks = blocks_dce } in
+   
+   (* 第二次常量折叠（处理新的常量） *)
+   let entry_folded2 = fold_constants_block f_dce.entry in
+   let blocks_folded2 = List.map fold_constants_block f_dce.blocks in
+   let f_folded2 = { f_dce with entry = entry_folded2; blocks = blocks_folded2 } in
+   
+   (* 第二次死代码删除（删除剩余的不可达代码） *)
+   let entry_dce2 = dead_code_elimination_block f_folded2.entry in
+   let blocks_dce2 = List.map dead_code_elimination_block f_folded2.blocks in
+   let f_dce2 = { f_folded2 with entry = entry_dce2; blocks = blocks_dce2 } in
+   
+   (* 清理未使用的局部变量 *)
+   let all_instrs = 
+     let instrs1 = entry_dce2.instrs in
+     let instrs2 = List.fold_left (fun acc (b: basic_block) -> acc @ b.instrs) [] blocks_dce2 in
+     instrs1 @ instrs2
+   in
+   let f_cleaned = clean_locals f_dce2 all_instrs in
+   
+   let after_count = count_instrs f_cleaned in
+   
+   if before_count > after_count then
+     Printf.eprintf "  Removed %d instructions (%d -> %d, reduced %.1f%%)\n" 
+       (before_count - after_count) before_count after_count
+       (float_of_int (before_count - after_count) *. 100.0 /. float_of_int before_count);
+   
+   f_cleaned
  
  (* 对IR程序进行完整优化 *)
  let optimize_program (prog: ir_program) : ir_program =
@@ -884,7 +905,7 @@ let optimize_function (f: ir_func) : ir_func =
  
  
  (* ================================================================
-    打印函数
+    打印函数 - 全部输出到 stderr（不影响汇编输出）
     ================================================================ *)
  
  (* 操作数转字符串用于打印 *)
@@ -922,12 +943,12 @@ let optimize_function (f: ir_func) : ir_func =
    | Return None -> "return"
    | Empty -> ""
  
- (* 打印一个基本块的标签及其所有指令 *)
+ (* 打印一个基本块的标签及其所有指令 - 输出到 stderr *)
  let dump_block b =
    Printf.eprintf "%s:\n" b.label;
    List.iter (fun i -> Printf.eprintf "  %s\n" (tac_str i)) b.instrs
  
- (* 打印一个 IR 函数的完整信息（参数、局部变量、基本块） *)
+ (* 打印一个 IR 函数的完整信息 - 输出到 stderr *)
  let dump_func f =
    Printf.eprintf "\nfunc %s(%s):\n" f.fname (String.concat ", " f.params);
    Printf.eprintf "  locals: [%s]\n" (String.concat ", " f.locals);
@@ -935,7 +956,7 @@ let optimize_function (f: ir_func) : ir_func =
    dump_block f.entry;
    List.iter dump_block f.blocks
  
- (* 打印整个 IR 程序（全局变量和所有函数） *)
+ (* 打印整个 IR 程序 - 输出到 stderr *)
  let dump_ir prog =
    List.iter (function
      | GlobalVar (name, Some v) -> Printf.eprintf "global %s = %d\n" name v
