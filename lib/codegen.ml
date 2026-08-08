@@ -84,7 +84,6 @@ let store_op reg op map =
 (* 翻译单条 TAC 指令 *)
 let emit_tac fname tac_inst map current_args =
   match tac_inst with
-  | Empty -> ()  (* 忽略空指令 *)
   | Assign (x, y) ->
       load_op "t0" y map;
       store_op "t0" x map
@@ -323,9 +322,7 @@ let emit_tac fname tac_inst map current_args =
 (* 翻译单个基本块 *)
 let emit_block fname (b: basic_block) map current_args =
   Printf.printf "%s:\n" b.label;
-  (* 过滤掉 Empty 指令 *)
-  let instrs = List.filter (fun inst -> inst <> Empty) b.instrs in
-  List.iter (fun inst -> emit_tac fname inst map current_args) instrs
+  List.iter (fun inst -> emit_tac fname inst map current_args) b.instrs
 
 (* 翻译单个函数 *)
 let emit_function (f: ir_func) =

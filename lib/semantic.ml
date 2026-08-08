@@ -161,7 +161,7 @@
                  if expected_args <> actual_args then
                    add_err st (ArgCountMismatch (fname, expected_args, actual_args))
              | _ -> 
-                 add_err st (NotAFunction fname));
+                 add_err st (NotAFunction fname));   (* FIX: 用 NotAFunction 替代 UndeclaredVar *)
             List.iter (check_expr st) args)
  
  
@@ -352,17 +352,10 @@
  (* 对外接口：语义分析 + IR 生成 *)
  
  (* 语义分析入口：检查通过后生成 IR，否则返回错误列表 *)
- let analyze_with_opt (prog: Ast.prog) (optimize: bool) : (Ir.ir_program, semantic_error list) result =
+ let analyze (prog: Ast.prog) : (Ir.ir_program, semantic_error list) result =
    let errs = check_program prog in
    if errs = [] then
-     let ir = Ir.generate prog in
-     if optimize then
-       Ok (Ir.optimize_program ir)  (* 使用完整优化流水线：常量折叠 + 死代码删除 *)
-     else
-       Ok ir
+     Ok (Ir.generate prog)
    else
      Error errs
  
- (* 保持原有接口兼容 *)
- let analyze (prog: Ast.prog) : (Ir.ir_program, semantic_error list) result =
-   analyze_with_opt prog false

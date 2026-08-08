@@ -1,14 +1,7 @@
 (* main.ml *)
 let () =
-  (* 解析命令行参数 *)
-  let optimize = ref false in
-  let args = Array.to_list Sys.argv in
-  List.iter (fun arg ->
-    if arg = "-opt" then (
-      optimize := true;
-      (* Printf.eprintf "=== Optimization ENABLED ===\n" *)
-    )
-  ) args;
+  (* 检查是否开启了优化 *)
+  let enable_opt = Array.exists (fun s -> s = "-opt") Sys.argv in
   
   try
     (* 1. 从标准输入读取 ToyC 源代码 *)
@@ -17,8 +10,11 @@ let () =
     (* 2. 词法与语法分析 *)
     let ast = Lib.Parser.prog Lib.Lexer.token lexbuf in
     
-    (* 3. 语义分析与 IR 生成（带优化选项） *)
-    (match Lib.Semantic.analyze_with_opt ast !optimize with
+    (* 【修改】注释掉 AST 调试输出，不让它污染标准输出 *)
+    (* Lib.Ast.dump_ast ast; *)
+
+    (* 3. 语义分析与 IR 生成 *)
+    (match Lib.Semantic.analyze ast with
     | Error errors ->
         List.iter
           (fun e -> Printf.fprintf stderr "%s\n" (Lib.Semantic.report_error e))
@@ -26,15 +22,25 @@ let () =
         exit 1
 
     | Ok ir ->
-        (* 如果优化启用，打印优化后的IR到stderr用于调试 *)
-        (* if !optimize then (
-          Printf.eprintf "\n=== Optimized IR ===\n";
-          Lib.Ir.dump_ir ir
-        ); *)
-        (* 直接调用汇编代码生成器 *)
-        Lib.Codegen.generate_riscv ir
+        (* 如果开启优化，进行常量折叠和算术优化 *)
+        let optimized_ir =
+          if enable_opt then
+            Lib.Ir.arithmetic_optimize ir
+          else
+            ir
+        in
+        
+        (* 【修改】注释掉原本的 IR 打印和成功提示 *)
+        (* Printf.printf "Semantic check success!\n";
+        Lib.Ir.dump_ir ir ; *)
+        
+        (* 【关键】直接调用汇编代码生成器，将 RV32I 汇编流打印到标准输出 *)
+        Lib.Codegen.generate_riscv optimized_ir
     );
-  
+
+    (* 【修改】注释掉尾部的统计信息，保持汇编文件纯净 *)
+    (* Printf.printf "Success: Units parsed: %d\n" (List.length ast) *)
+
   with
   | Lib.Lexer.Error msg ->
       Printf.fprintf stderr "Lexical error: %s\n" msg; exit 1
