@@ -1,23 +1,30 @@
 
-<<<<<<< HEAD
-// test_mod_large.tc
+// ============================================================
+// 测试程序：验证大数运算优化
+// 
+// 测试场景：
+//   1. 大数乘法 (结果超过 32 位？)
+//   2. 大掩码取模 (mask > 2047)
+//   3. 大数除法
+//   4. 混合运算
+// ============================================================
+
 int mod_large(int x) {
-    return x % 4096;
+    return x % 4096;        // mask = 4095 (> 2047)
+}
+
+int mod_huge(int x) {
+    return x % 32768;       // mask = 32767 (> 2047)
+}
+
+int mul_large(int a, int b) {
+    return a * b;           // 大数乘法
 }
 
 int main() {
     int x = 5000;
-    int z = mod_large(x);
-=======
-// test_runtime_mul.tc
-int mul(int a, int b) {
-    return a * b;
-}
-
-int main() {
-    int x = 10;
-    int y = 20;
-    int z = mul(x, y);
->>>>>>> 3d3e7f4 (内联乘法优化)
-    return z;
+    int a = mod_large(x);    // 5000 % 4096 = 904
+    int b = mod_huge(x);     // 5000 % 32768 = 5000
+    int c = mul_large(1000, 2000);  // 2,000,000
+    return a + b + c;        // 904 + 5000 + 2000000 = 2,005,904
 }

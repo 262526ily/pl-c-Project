@@ -127,12 +127,6 @@ let compute_offsets (f: ir_func) =
 (* ============================================================ *)
 (* 生成乘除法优化的代码 *)
 
-<<<<<<< HEAD
-(* 检查立即数是否在 12 位范围内 *)
-let is_imm12 n = n >= -2048 && n <= 2047
-
-=======
->>>>>>> 3d3e7f4 (内联乘法优化)
 (* 生成乘法代码（使用 M 扩展 + 常量优化） *)
 let emit_mul x y z map =
   let is_y_const = is_const_op y in
@@ -220,17 +214,7 @@ let emit_mod x y z map =
       Printf.printf "    li t0, 0\n"
     else if is_power_of_two n then
       let mask = n - 1 in
-<<<<<<< HEAD
-      if is_imm12 mask then
-        (* 12 位立即数可以直接用 andi *)
-        Printf.printf "    andi t0, t0, %d\n" mask
-      else
-        (* 超出 12 位范围，使用 li + and *)
-        Printf.printf "    li t1, %d\n" mask;
-        Printf.printf "    and t0, t0, t1\n"
-=======
       Printf.printf "    andi t0, t0, %d\n" mask
->>>>>>> 3d3e7f4 (内联乘法优化)
     else
       (load_op "t1" z map;
        Printf.printf "    rem t0, t0, t1\n")
@@ -239,10 +223,7 @@ let emit_mod x y z map =
      load_op "t1" z map;
      Printf.printf "    rem t0, t0, t1\n");
   store_op "t0" x map
-<<<<<<< HEAD
-=======
 
->>>>>>> 3d3e7f4 (内联乘法优化)
 (* ============================================================ *)
 (* 翻译单条 TAC 指令 *)
 
