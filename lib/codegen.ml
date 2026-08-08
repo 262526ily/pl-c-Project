@@ -1,7 +1,7 @@
 (* lib/codegen.ml *)
 open Ir
 
-(* 唯一标签计数器，防止内联展开时的汇编标签冲突 *)
+(* 唯一标签计数器 *)
 let inline_label_counter = ref 0
 
 let gen_inline_label prefix =
@@ -17,6 +17,24 @@ let rec split_at n = function
       x :: prefix, suffix
 
 (* ============================================================ *)
+(* 常量判断和数学工具 *)
+
+(* 判断操作数是否为常量 *)
+let is_const_op = function Const _ -> true | _ -> false
+let get_const_val = function Const n -> n | _ -> 0
+
+(* 判断是否为 2 的幂 *)
+let is_power_of_two n =
+  n > 0 && (n land (n - 1)) = 0
+
+let log2 n =
+  let rec loop x acc =
+    if x = 1 then acc
+    else loop (x lsr 1) (acc + 1)
+  in
+  if n <= 0 then 0 else loop n 0
+
+(* ============================================================ *)
 (* 安全的偏移量查找 *)
 
 let find_offset map op =
@@ -26,7 +44,7 @@ let find_offset map op =
       match op with
       | Var name ->
           Printf.eprintf "Warning: Variable '%s' not found in offset map, treating as global\n" name;
-          -1  (* 返回 -1 表示全局变量 *)
+          -1
       | Temp t ->
           Printf.eprintf "Fatal: Temp %d not found in offset map\n" t;
           exit 1
@@ -34,14 +52,8 @@ let find_offset map op =
           Printf.eprintf "Fatal: Const should not be in offset map\n";
           exit 1
 
-let has_offset map op =
-  match op with
-  | Var name -> Hashtbl.mem map (Var name)
-  | Temp t -> Hashtbl.mem map (Temp t)
-  | Const _ -> false
-
 (* ============================================================ *)
-(* 安全加载操作数 *)
+(* 加载和存储操作数 *)
 
 let load_op reg op map =
   match op with
@@ -60,16 +72,12 @@ let load_op reg op map =
         let off = Hashtbl.find map (Var name) in
         Printf.printf "    lw %s, %d(fp)\n" reg off
       else
-        (* 找不到说明是全局变量 *)
         (Printf.printf "    la %s, %s\n" reg name;
          Printf.printf "    lw %s, 0(%s)\n" reg reg)
 
-(* ============================================================ *)
-(* 安全存储操作数 *)
-
 let store_op reg op map =
   match op with
-  | Const _ -> () (* 常量不可作为左值 *)
+  | Const _ -> ()
   | Temp t ->
       if Hashtbl.mem map (Temp t) then
         let off = Hashtbl.find map (Temp t) in
@@ -83,7 +91,6 @@ let store_op reg op map =
         let off = Hashtbl.find map (Var name) in
         Printf.printf "    sw %s, %d(fp)\n" reg off
       else
-        (* 全局变量写回 *)
         (Printf.printf "    la t3, %s\n" name;
          Printf.printf "    sw %s, 0(t3)\n" reg)
 
@@ -94,18 +101,15 @@ let compute_offsets (f: ir_func) =
   let local_slots = ref 0 in
   let map = Hashtbl.create 32 in
   
-  (* 处理函数参数 *)
   List.iteri (fun i name ->
     if i < 8 then (
       incr local_slots;
       Hashtbl.add map (Var name) (-8 - 4 * !local_slots)
     ) else (
-      (* 大于 8 个的参数由 Caller 压栈，在旧 SP（即当前 FP）的正偏移处 *)
       Hashtbl.add map (Var name) ((i - 8) * 4)
     )
   ) f.params;
   
-  (* 处理其它未映射的局部变量 *)
   List.iter (fun name ->
     if not (Hashtbl.mem map (Var name)) then (
       incr local_slots;
@@ -113,13 +117,112 @@ let compute_offsets (f: ir_func) =
     )
   ) f.locals;
   
-  (* 处理所有临时变量 *)
   for t = 0 to f.temps - 1 do
     incr local_slots;
     Hashtbl.add map (Temp t) (-8 - 4 * !local_slots)
   done;
   
   (!local_slots, map)
+
+(* ============================================================ *)
+(* 生成乘除法优化的代码 *)
+
+(* 生成乘法代码（使用 M 扩展 + 常量优化） *)
+let emit_mul x y z map =
+  let is_y_const = is_const_op y in
+  let is_z_const = is_const_op z in
+  
+  if is_z_const then
+    let n = get_const_val z in
+    load_op "t0" y map;
+    if n = 0 then
+      Printf.printf "    li t0, 0\n"
+    else if n = 1 then
+      ()
+    else if n = -1 then
+      Printf.printf "    neg t0, t0\n"
+    else if is_power_of_two n then
+      let shift = log2 n in
+      Printf.printf "    slli t0, t0, %d\n" shift
+    else if n = 3 then
+      (Printf.printf "    slli t1, t0, 1\n";
+       Printf.printf "    add t0, t0, t1\n")
+    else if n = 5 then
+      (Printf.printf "    slli t1, t0, 2\n";
+       Printf.printf "    add t0, t0, t1\n")
+    else if n = 7 then
+      (Printf.printf "    slli t1, t0, 3\n";
+       Printf.printf "    sub t0, t1, t0\n")
+    else if n = 9 then
+      (Printf.printf "    slli t1, t0, 3\n";
+       Printf.printf "    add t0, t0, t1\n")
+    else if n = 10 then
+      (Printf.printf "    slli t1, t0, 3\n";
+       Printf.printf "    slli t2, t0, 1\n";
+       Printf.printf "    add t0, t1, t2\n")
+    else
+      (load_op "t1" z map;
+       Printf.printf "    mul t0, t0, t1\n")
+  else if is_y_const then
+    let n = get_const_val y in
+    load_op "t0" z map;
+    if n = 0 then
+      Printf.printf "    li t0, 0\n"
+    else if n = 1 then
+      ()
+    else if n = -1 then
+      Printf.printf "    neg t0, t0\n"
+    else if is_power_of_two n then
+      let shift = log2 n in
+      Printf.printf "    slli t0, t0, %d\n" shift
+    else
+      (load_op "t1" y map;
+       Printf.printf "    mul t0, t0, t1\n")
+  else
+    (load_op "t0" y map;
+     load_op "t1" z map;
+     Printf.printf "    mul t0, t0, t1\n");
+  store_op "t0" x map
+
+(* 生成除法代码（使用 M 扩展 + 常量优化） *)
+let emit_div x y z map =
+  if is_const_op z then
+    let n = get_const_val z in
+    load_op "t0" y map;
+    if n = 1 then
+      ()
+    else if n = -1 then
+      Printf.printf "    neg t0, t0\n"
+    else if is_power_of_two n then
+      let shift = log2 n in
+      Printf.printf "    srai t0, t0, %d\n" shift
+    else
+      (load_op "t1" z map;
+       Printf.printf "    div t0, t0, t1\n")
+  else
+    (load_op "t0" y map;
+     load_op "t1" z map;
+     Printf.printf "    div t0, t0, t1\n");
+  store_op "t0" x map
+
+(* 生成取模代码（使用 M 扩展 + 常量优化） *)
+let emit_mod x y z map =
+  if is_const_op z then
+    let n = get_const_val z in
+    load_op "t0" y map;
+    if n = 1 then
+      Printf.printf "    li t0, 0\n"
+    else if is_power_of_two n then
+      let mask = n - 1 in
+      Printf.printf "    andi t0, t0, %d\n" mask
+    else
+      (load_op "t1" z map;
+       Printf.printf "    rem t0, t0, t1\n")
+  else
+    (load_op "t0" y map;
+     load_op "t1" z map;
+     Printf.printf "    rem t0, t0, t1\n");
+  store_op "t0" x map
 
 (* ============================================================ *)
 (* 翻译单条 TAC 指令 *)
@@ -132,132 +235,9 @@ let emit_tac fname tac_inst map current_args =
 
   | AssignBinOp (x, op, y, z) ->
       (match op with
-       (* ================= 1. 乘法内联直接打印 ================= *)
-       | Ast.Mul ->
-            let lbl_mul_pos1 = gen_inline_label ".L_mul_pos1" in
-            let lbl_mul_pos2 = gen_inline_label ".L_mul_pos2" in
-            let lbl_loop     = gen_inline_label ".L_mul_loop" in
-            let lbl_skip     = gen_inline_label ".L_mul_skip" in
-            let lbl_end      = gen_inline_label ".L_mul_end" in
-            let lbl_neg_result = gen_inline_label ".L_mul_neg_result" in
-            
-            load_op "t0" y map;       (* t0 = 被乘数 *)
-            load_op "t1" z map;       (* t1 = 乘数 *)
-            
-            (* RV32I 内联乘法开始 *)
-            (* ----- 符号处理 ----- *)
-            Printf.printf "    li t6, 0\n";               (* 符号标记 *)
-            Printf.printf "    bge t0, x0, %s\n" lbl_mul_pos1;
-            Printf.printf "    sub t0, x0, t0\n";         (* t0 = -t0 *)
-            Printf.printf "    xori t6, t6, 1\n";
-            Printf.printf "%s:\n" lbl_mul_pos1;
-
-            Printf.printf "    bge t1, x0, %s\n" lbl_mul_pos2;
-            Printf.printf "    sub t1, x0, t1\n";         (* t1 = -t1 *)
-            Printf.printf "    xori t6, t6, 1\n";
-            Printf.printf "%s:\n" lbl_mul_pos2;
-
-            (* ----- 无符号乘法 (原有逻辑) ----- *)
-            Printf.printf "    li t2, 0\n";
-            Printf.printf "%s:\n" lbl_loop;
-            Printf.printf "    beqz t1, %s\n" lbl_end;
-            Printf.printf "    andi t3, t1, 1\n";
-            Printf.printf "    beqz t3, %s\n" lbl_skip;
-            Printf.printf "    add t2, t2, t0\n";
-            Printf.printf "%s:\n" lbl_skip;
-            Printf.printf "    slli t0, t0, 1\n";
-            Printf.printf "    srli t1, t1, 1\n";
-            Printf.printf "    j %s\n" lbl_loop;
-            Printf.printf "%s:\n" lbl_end;
-
-            (* ----- 恢复有符号结果 ----- *)
-            Printf.printf "    beqz t6, %s\n" lbl_neg_result;
-            Printf.printf "    sub t2, x0, t2\n";
-            Printf.printf "%s:\n" lbl_neg_result;
-            (* RV32I 内联乘法结束 *)
-            
-            store_op "t2" x map       (* 将计算结果 t2 写回目标操作数 *)
-
-       (* ================= 2. 除法与取模内联直接打印 ================= *)
-       | Ast.Div | Ast.Mod ->
-           let lbl_start  = gen_inline_label ".L_divmod_start" in
-           let lbl_n_pos  = gen_inline_label ".L_divmod_n_pos" in
-           let lbl_d_pos  = gen_inline_label ".L_divmod_d_pos" in
-           let lbl_loop   = gen_inline_label ".L_divmod_loop" in
-           let lbl_skip   = gen_inline_label ".L_divmod_skip" in
-           let lbl_end    = gen_inline_label ".L_divmod_end" in
-           let lbl_q_pos  = gen_inline_label ".L_divmod_q_pos" in
-           let lbl_r_pos  = gen_inline_label ".L_divmod_r_pos" in
-           let lbl_finish = gen_inline_label ".L_divmod_finish" in
-           
-           load_op "t0" y map;       (* t0 = 被除数 N *)
-           load_op "t1" z map;       (* t1 = 除数 D *)
-           
-           (* RV32I 内联除法/取模开始 *)
-           (* 除 0 保护检查 *)
-           Printf.printf "    bnez t1, %s\n" lbl_start;
-           Printf.printf "    li t2, 0\n";          (* 除以0时商 Q=0 *)
-           Printf.printf "    li t3, 0\n";          (* 余数 R=0 *)
-           Printf.printf "    j %s\n" lbl_finish;
-           
-           Printf.printf "%s:\n" lbl_start;
-           Printf.printf "    li t6, 0\n";          (* t6 记录商的最终符号 (1负0正) *)
-           Printf.printf "    li t4, 0\n";          (* t4 记录余数的最终符号 (由N决定) *)
-           
-           (* 提取被除数 N 的绝对值 *)
-           Printf.printf "    bge t0, x0, %s\n" lbl_n_pos;
-           Printf.printf "    sub t0, x0, t0\n";    (* t0 = |N| *)
-           Printf.printf "    li t6, 1\n";
-           Printf.printf "    li t4, 1\n";
-           Printf.printf "%s:\n" lbl_n_pos;
-           
-           (* 提取除数 D 的绝对值 *)
-           Printf.printf "    bge t1, x0, %s\n" lbl_d_pos;
-           Printf.printf "    sub t1, x0, t1\n";    (* t1 = |D| *)
-           Printf.printf "    xori t6, t6, 1\n";    (* 异或决定商的符号 *)
-           Printf.printf "%s:\n" lbl_d_pos;
-           
-           (* 无符号长除法核心状态机运算 *)
-           Printf.printf "    li t2, 0\n";          (* 暂存商 Q = 0 *)
-           Printf.printf "    li t3, 0\n";          (* 暂存余数 R = 0 *)
-           Printf.printf "    li t5, 31\n";         (* 循环计数器 i = 31 *)
-           
-           Printf.printf "%s:\n" lbl_loop;
-           Printf.printf "    bltz t5, %s\n" lbl_end;
-           Printf.printf "    slli t3, t3, 1\n";    (* R = R << 1 *)
-           Printf.printf "    srl a2, t0, t5\n";    (* N >> i (使用空闲的 a2 临时中转) *)
-           Printf.printf "    andi a2, a2, 1\n";    (* 获取 N 的第 i 位 *)
-           Printf.printf "    or t3, t3, a2\n";     (* R = R | bit *)
-           Printf.printf "    blt t3, t1, %s\n" lbl_skip;
-           Printf.printf "    sub t3, t3, t1\n";    (* R = R - D *)
-           Printf.printf "    li a2, 1\n";
-           Printf.printf "    sll a2, a2, t5\n";    (* 1 << i *)
-           Printf.printf "    or t2, t2, a2\n";     (* Q = Q | (1 << i) *)
-           Printf.printf "%s:\n" lbl_skip;
-           Printf.printf "    addi t5, t5, -1\n";   (* i-- *)
-           Printf.printf "    j %s\n" lbl_loop;
-           Printf.printf "%s:\n" lbl_end;
-           
-           (* 恢复有符号商的符号 *)
-           Printf.printf "    beqz t6, %s\n" lbl_q_pos;
-           Printf.printf "    sub t2, x0, t2\n";
-           Printf.printf "%s:\n" lbl_q_pos;
-           
-           (* 恢复有符号余数的符号 (余数符号与被除数 N 一致) *)
-           Printf.printf "    beqz t4, %s\n" lbl_r_pos;
-           Printf.printf "    sub t3, x0, t3\n";
-           Printf.printf "%s:\n" lbl_r_pos;
-           
-           Printf.printf "%s:\n" lbl_finish;
-           (* RV32I 内联除法/取模结束 --- *)
-           
-           (* 根据 TAC 操作码，决定把"商"还是"余数"写回内存 *)
-           if op = Ast.Div then
-             store_op "t2" x map                    (* t2 存的是商 *)
-           else
-             store_op "t3" x map                    (* t3 存的是余数 *)
-
-       (* ================= 3. RV32I 原生支持的标准有符号/逻辑运算 ================= *)
+       | Ast.Mul -> emit_mul x y z map
+       | Ast.Div -> emit_div x y z map
+       | Ast.Mod -> emit_mod x y z map
        | _ ->
            load_op "t0" y map;
            load_op "t1" z map;
@@ -272,7 +252,7 @@ let emit_tac fname tac_inst map current_args =
             | Ast.Ge  -> Printf.printf "    slt t0, t0, t1\n    xori t0, t0, 1\n"
             | Ast.And -> Printf.printf "    and t0, t0, t1\n"
             | Ast.Or  -> Printf.printf "    or t0, t0, t1\n"
-            | Ast.Mul | Ast.Div | Ast.Mod -> assert false (* 已在外部 match 处理 *)
+            | Ast.Mul | Ast.Div | Ast.Mod -> assert false
            );
            store_op "t0" x map)
 
@@ -306,12 +286,10 @@ let emit_tac fname tac_inst map current_args =
       current_args := rem;
       let args = call_args in
       
-      (* 如果调用的函数参数超过 8 个，需要为其在 sp 低位开辟动态传参空间 *)
       let extra_space = if nargs > 8 then ((nargs - 8) * 4 + 15) / 16 * 16 else 0 in
       if extra_space > 0 then
         Printf.printf "    addi sp, sp, -%d\n" extra_space;
         
-      (* 传递参数 *)
       List.iteri (fun j arg ->
         if j < 8 then
           load_op (Printf.sprintf "a%d" j) arg map
@@ -320,14 +298,11 @@ let emit_tac fname tac_inst map current_args =
            Printf.printf "    sw t0, %d(sp)\n" ((j - 8) * 4))
       ) args;
       
-      (* 执行调用 *)
       Printf.printf "    call %s\n" callee;
       
-      (* 恢复动态开辟的传参栈空间 *)
       if extra_space > 0 then
         Printf.printf "    addi sp, sp, %d\n" extra_space;
         
-      (* 保存返回值 *)
       store_op "a0" dest map
 
   | Return (Some x) ->
@@ -349,31 +324,26 @@ let emit_block fname (b: basic_block) map current_args =
 
 let emit_function (f: ir_func) =
   let slots, map = compute_offsets f in
-  (* 计算对齐 16 字节后的帧大小（8 字节用于保存 ra 和 fp） *)
   let framesize = ((8 + slots * 4 + 15) / 16) * 16 in
   
   Printf.printf "    .globl %s\n" f.fname;
   Printf.printf "%s:\n" f.fname;
   
-  (* 函数序言 (Prologue) *)
   Printf.printf "    addi sp, sp, -%d\n" framesize;
   Printf.printf "    sw ra, %d(sp)\n" (framesize - 4);
   Printf.printf "    sw fp, %d(sp)\n" (framesize - 8);
   Printf.printf "    addi fp, sp, %d\n" framesize;
   
-  (* 将传进来的前 8 个参数从寄存器转存到本地分配的栈槽 *)
   List.iteri (fun i name ->
     if i < 8 then
       let off = Hashtbl.find map (Var name) in
       Printf.printf "    sw a%d, %d(fp)\n" i off
   ) f.params;
   
-  (* 函数体翻译 (Body) *)
   let current_args = ref [] in
   List.iter (fun inst -> emit_tac f.fname inst map current_args) f.entry.instrs;
   List.iter (fun b -> emit_block f.fname b map current_args) f.blocks;
   
-  (* 函数结语 (Epilogue) *)
   Printf.printf ".L_epilogue_%s:\n" f.fname;
   Printf.printf "    lw ra, -4(fp)\n";
   Printf.printf "    lw fp, -8(fp)\n";
@@ -384,7 +354,6 @@ let emit_function (f: ir_func) =
 (* 整个程序的代码生成主入口点 *)
 
 let generate_riscv (prog: ir_program) =
-  (* 打印全局段声明 *)
   Printf.printf "    .text\n\n";
 
   List.iter (function
