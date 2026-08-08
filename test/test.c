@@ -1,12 +1,11 @@
 
-// test_runtime_mul.tc
-int mul(int a, int b) {
-    return a * b;
+// test_mod_large.tc
+int mod_large(int x) {
+    return x % 4096;
 }
 
 int main() {
-    int x = 10;
-    int y = 20;
-    int z = mul(x, y);
+    int x = 5000;
+    int z = mod_large(x);
     return z;
 }
