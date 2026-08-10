@@ -629,7 +629,7 @@ let fold_one_tac inst =
        | None -> Some (AssignUnOp (x, op, y)))
 
   (* ===== 13. 无变化 ===== *)
-  | _ -> Some inst 
+  | _ -> None
 
 (* ============================================================ *)
 (* 对外接口：对整个 IR 程序做常量折叠与算术优化 *)
@@ -646,31 +646,35 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
   (* 简化：当左操作数是常量时 - 直接返回简化后的 operand *)
   let simplify_with_const_left op const_val right =
     match op, const_val with
-    | Ast.Add, 0 -> Some right
-    | Ast.Sub, 0 -> None
-    | Ast.Mul, 0 -> Some (Const 0)
-    | Ast.Mul, 1 -> Some right
-    | Ast.Div, 0 -> None
-    | Ast.And, 0 -> Some (Const 0)
-    | Ast.And, 1 -> Some right
-    | Ast.Or, 0 -> Some right
-    | Ast.Or, 1 -> Some (Const 1)
+    | Ast.Add, 0 -> Some right   (* 0 + right = right *)
+    | Ast.Sub, 0 -> 
+        (* 0 - right = -right，需要用 AssignUnOp *)
+        (* 但我们不能在这里返回 UnOp，因为需要的是 operand *)
+        (* 所以返回 None，让 fold_one_tac 处理 *)
+        None
+    | Ast.Mul, 0 -> Some (Const 0)  (* 0 * right = 0 *)
+    | Ast.Mul, 1 -> Some right   (* 1 * right = right *)
+    | Ast.Div, 0 -> None  (* 0 / right = 0，但 right 可能为 0，保留 *)
+    | Ast.And, 0 -> Some (Const 0)  (* 0 && right = 0 *)
+    | Ast.And, 1 -> Some right   (* 1 && right = right *)
+    | Ast.Or, 0 -> Some right    (* 0 || right = right *)
+    | Ast.Or, 1 -> Some (Const 1)   (* 1 || right = 1 *)
     | _ -> None
   in
   
   (* 简化：当右操作数是常量时 *)
   let simplify_with_const_right op left const_val =
     match op, const_val with
-    | Ast.Add, 0 -> Some left
-    | Ast.Sub, 0 -> Some left
-    | Ast.Mul, 0 -> Some (Const 0)
-    | Ast.Mul, 1 -> Some left
-    | Ast.Div, 1 -> Some left
-    | Ast.Mod, 1 -> Some (Const 0)
-    | Ast.And, 0 -> Some (Const 0)
-    | Ast.And, 1 -> Some left
-    | Ast.Or, 0 -> Some left
-    | Ast.Or, 1 -> Some (Const 1)
+    | Ast.Add, 0 -> Some left    (* left + 0 = left *)
+    | Ast.Sub, 0 -> Some left    (* left - 0 = left *)
+    | Ast.Mul, 0 -> Some (Const 0)  (* left * 0 = 0 *)
+    | Ast.Mul, 1 -> Some left    (* left * 1 = left *)
+    | Ast.Div, 1 -> Some left    (* left / 1 = left *)
+    | Ast.Mod, 1 -> Some (Const 0)  (* left % 1 = 0 *)
+    | Ast.And, 0 -> Some (Const 0)  (* left && 0 = 0 *)
+    | Ast.And, 1 -> Some left    (* left && 1 = left *)
+    | Ast.Or, 0 -> Some left     (* left || 0 = left *)
+    | Ast.Or, 1 -> Some (Const 1)   (* left || 1 = 1 *)
     | _ -> None
   in
   
@@ -682,20 +686,20 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
     local_consts := StringMap.remove name !local_consts
   in
   
-  (* ===== 修改1：获取操作数的常量值 - 现在检查局部常量 ===== *)
-  let get_const_value op =
+  
+  (* 获取操作数的常量值 *)
+let get_const_value op =
     match op with
     | Const n -> Some n
     | Var name -> 
-        (* 先检查全局常量 *)
+        (* 只检查全局常量，不追踪局部变量 *)
         if StringMap.mem name !const_env then
           Some (StringMap.find name !const_env)
         else
-          (* 再检查局部常量 *)
-          StringMap.find_opt name !local_consts
-    | Temp n -> 
-        let key = "t" ^ string_of_int n in
-        StringMap.find_opt key !local_consts
+          None
+    | Temp _ -> 
+        None  (* 临时变量不追踪常量 *)
+    
   in
   
   (* 记录常量值 *)
@@ -717,32 +721,21 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
     | _ -> ()
   in
   
-  (* 将全局常量替换为 Const 的辅助函数 *)
-  let replace_global op =
-    match op with
-    | Var name when StringMap.mem name !const_env ->
-        Const (StringMap.find name !const_env)
-    | _ -> op
-  in
-  
-  (* ===== 修改2：优化一条指令（带常量传播）===== *)
+  (* 优化一条指令（带常量传播） *)
   let fold_with_propagation inst =
     match inst with
     | Assign (x, y) ->
-        let y' = replace_global y in
-        (match get_const_value y' with
+        (match get_const_value y with
          | Some n ->
              set_local_const x n;
              Some (Assign (x, Const n))
          | None ->
              clear_const x;
-             fold_one_tac (Assign (x, y')))   (* 可能返回 None *)
-  
+             fold_one_tac inst)
+    
     | AssignBinOp (x, op, y, z) ->
-        let y' = replace_global y in
-        let z' = replace_global z in
-        let y_const = get_const_value y' in
-        let z_const = get_const_value z' in
+        let y_const = get_const_value y in
+        let z_const = get_const_value z in
         (match y_const, z_const with
          | Some n1, Some n2 ->
              (match eval_binop_const op n1 n2 with
@@ -751,30 +744,29 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
                   Some (Assign (x, Const result))
               | None ->
                   clear_const x;
-                  fold_one_tac (AssignBinOp (x, op, y', z')))
+                  fold_one_tac inst)
          | Some n1, None ->
-             (match simplify_with_const_left op n1 z' with
+             (match simplify_with_const_left op n1 z with
               | Some simplified ->
                   clear_const x;
                   Some (Assign (x, simplified))
               | None ->
                   clear_const x;
-                  fold_one_tac (AssignBinOp (x, op, y', z')))
+                  fold_one_tac inst)
          | None, Some n2 ->
-             (match simplify_with_const_right op y' n2 with
+             (match simplify_with_const_right op y n2 with
               | Some simplified ->
                   clear_const x;
                   Some (Assign (x, simplified))
               | None ->
                   clear_const x;
-                  fold_one_tac (AssignBinOp (x, op, y', z')))
+                  fold_one_tac inst)
          | None, None ->
              clear_const x;
-             fold_one_tac (AssignBinOp (x, op, y', z')))
-  
+             fold_one_tac inst)
+    
     | AssignUnOp (x, op, y) ->
-        let y' = replace_global y in
-        (match get_const_value y' with
+        (match get_const_value y with
          | Some n ->
              (match eval_unop_const op n with
               | Some result ->
@@ -782,68 +774,38 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
                   Some (Assign (x, Const result))
               | None ->
                   clear_const x;
-                  fold_one_tac (AssignUnOp (x, op, y')))
+                  fold_one_tac inst)
          | None ->
              clear_const x;
-             fold_one_tac (AssignUnOp (x, op, y')))
-  
-    (* ===== 有副作用的指令：总是保留 ===== *)
+             fold_one_tac inst)
+    
     | Call (dest, _, _) ->
         clear_const dest;
-        Some inst
-  
+        fold_one_tac inst
+    
+    (* ===== 新增：处理 Return 指令 ===== *)
     | Return (Some x) ->
-        let x' = replace_global x in
-        (match get_const_value x' with
+        (match get_const_value x with
          | Some n ->
+             (* 返回值是常量，替换为 Const n *)
              Some (Return (Some (Const n)))
          | None ->
-             Some (Return (Some x')))
-  
-    | Return None ->
-        Some inst
-  
-    | Goto _ ->
-        Some inst
-  
-    | Label _ ->
-        Some inst
-  
-    | Param _ ->
-        Some inst
-  
-    (* ===== 常量条件分支 ===== *)
-    | IfGoto (x, l) ->
-        let x' = replace_global x in
-        (match get_const_value x' with
-         | Some n ->
-             if n = 0 then
-               None   (* 删除跳转 *)
-             else
-               Some (Goto l)
-         | None ->
-             Some inst)   (* 保留原指令 *)
-  
-    | IfNotGoto (x, l) ->
-        let x' = replace_global x in
-        (match get_const_value x' with
-         | Some n ->
-             if n = 0 then
-               Some (Goto l)
-             else
-               None   (* 删除跳转 *)
-         | None ->
-             Some inst)   (* 保留原指令 *)
-  
+             fold_one_tac inst)
     
-  in
+    | Return None ->
+        fold_one_tac inst
+    
+    | _ -> fold_one_tac inst
+   in
+  (* 优化基本块 *)
   let fold_block (b: basic_block) : basic_block =
     let new_instrs = List.fold_left (fun acc inst ->
       match fold_with_propagation inst with
       | Some folded -> folded :: acc
-      | None -> acc   (* 删除指令 *)
+      | None -> inst :: acc
     ) [] b.instrs in
-    { b with instrs = List.rev new_instrs } in
+    { b with instrs = List.rev new_instrs }
+  in
   
   (* 优化函数 *)
   let fold_func (f: ir_func) : ir_func =
