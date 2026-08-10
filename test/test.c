@@ -1,20 +1,16 @@
-// test_licm_7.tc
-// 测试 if 分支中的不变量
-const int N = 10;
-const int THRESHOLD = 5;
+// test_if_const.tc
+// 测试常量条件分支
+
+const int A = 10;
+const int B = 5;
 
 int main() {
-    int sum = 0;
-    int i = 0;
-    int step = THRESHOLD * 10;  // 50
+    int x = A;           // x = 10
+    int y = B;           // y = 5
     
-    while (i < N) {
-        if (i < THRESHOLD) {
-            sum = sum + step;   // step 不变
-        } else {
-            sum = sum + step * 2;  // step 不变
-        }
-        i = i + 1;
+    if (x > y) {         // 10 > 5 = true
+        return 100;
+    } else {
+        return 200;
     }
-    return sum;              // 5*50 + 5*100 = 750
 }

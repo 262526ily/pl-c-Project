@@ -646,35 +646,31 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
   (* 简化：当左操作数是常量时 - 直接返回简化后的 operand *)
   let simplify_with_const_left op const_val right =
     match op, const_val with
-    | Ast.Add, 0 -> Some right   (* 0 + right = right *)
-    | Ast.Sub, 0 -> 
-        (* 0 - right = -right，需要用 AssignUnOp *)
-        (* 但我们不能在这里返回 UnOp，因为需要的是 operand *)
-        (* 所以返回 None，让 fold_one_tac 处理 *)
-        None
-    | Ast.Mul, 0 -> Some (Const 0)  (* 0 * right = 0 *)
-    | Ast.Mul, 1 -> Some right   (* 1 * right = right *)
-    | Ast.Div, 0 -> None  (* 0 / right = 0，但 right 可能为 0，保留 *)
-    | Ast.And, 0 -> Some (Const 0)  (* 0 && right = 0 *)
-    | Ast.And, 1 -> Some right   (* 1 && right = right *)
-    | Ast.Or, 0 -> Some right    (* 0 || right = right *)
-    | Ast.Or, 1 -> Some (Const 1)   (* 1 || right = 1 *)
+    | Ast.Add, 0 -> Some right
+    | Ast.Sub, 0 -> None
+    | Ast.Mul, 0 -> Some (Const 0)
+    | Ast.Mul, 1 -> Some right
+    | Ast.Div, 0 -> None
+    | Ast.And, 0 -> Some (Const 0)
+    | Ast.And, 1 -> Some right
+    | Ast.Or, 0 -> Some right
+    | Ast.Or, 1 -> Some (Const 1)
     | _ -> None
   in
   
   (* 简化：当右操作数是常量时 *)
   let simplify_with_const_right op left const_val =
     match op, const_val with
-    | Ast.Add, 0 -> Some left    (* left + 0 = left *)
-    | Ast.Sub, 0 -> Some left    (* left - 0 = left *)
-    | Ast.Mul, 0 -> Some (Const 0)  (* left * 0 = 0 *)
-    | Ast.Mul, 1 -> Some left    (* left * 1 = left *)
-    | Ast.Div, 1 -> Some left    (* left / 1 = left *)
-    | Ast.Mod, 1 -> Some (Const 0)  (* left % 1 = 0 *)
-    | Ast.And, 0 -> Some (Const 0)  (* left && 0 = 0 *)
-    | Ast.And, 1 -> Some left    (* left && 1 = left *)
-    | Ast.Or, 0 -> Some left     (* left || 0 = left *)
-    | Ast.Or, 1 -> Some (Const 1)   (* left || 1 = 1 *)
+    | Ast.Add, 0 -> Some left
+    | Ast.Sub, 0 -> Some left
+    | Ast.Mul, 0 -> Some (Const 0)
+    | Ast.Mul, 1 -> Some left
+    | Ast.Div, 1 -> Some left
+    | Ast.Mod, 1 -> Some (Const 0)
+    | Ast.And, 0 -> Some (Const 0)
+    | Ast.And, 1 -> Some left
+    | Ast.Or, 0 -> Some left
+    | Ast.Or, 1 -> Some (Const 1)
     | _ -> None
   in
   
@@ -686,20 +682,20 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
     local_consts := StringMap.remove name !local_consts
   in
   
-  
-  (* 获取操作数的常量值 *)
-let get_const_value op =
+  (* ===== 修改1：获取操作数的常量值 - 现在检查局部常量 ===== *)
+  let get_const_value op =
     match op with
     | Const n -> Some n
     | Var name -> 
-        (* 只检查全局常量，不追踪局部变量 *)
+        (* 先检查全局常量 *)
         if StringMap.mem name !const_env then
           Some (StringMap.find name !const_env)
         else
-          None
-    | Temp _ -> 
-        None  (* 临时变量不追踪常量 *)
-    
+          (* 再检查局部常量 *)
+          StringMap.find_opt name !local_consts
+    | Temp n -> 
+        let key = "t" ^ string_of_int n in
+        StringMap.find_opt key !local_consts
   in
   
   (* 记录常量值 *)
@@ -721,21 +717,32 @@ let get_const_value op =
     | _ -> ()
   in
   
-  (* 优化一条指令（带常量传播） *)
+  (* 将全局常量替换为 Const 的辅助函数 *)
+  let replace_global op =
+    match op with
+    | Var name when StringMap.mem name !const_env ->
+        Const (StringMap.find name !const_env)
+    | _ -> op
+  in
+  
+  (* ===== 修改2：优化一条指令（带常量传播）===== *)
   let fold_with_propagation inst =
     match inst with
     | Assign (x, y) ->
-        (match get_const_value y with
+        let y' = replace_global y in
+        (match get_const_value y' with
          | Some n ->
              set_local_const x n;
              Some (Assign (x, Const n))
          | None ->
              clear_const x;
-             fold_one_tac inst)
+             fold_one_tac (Assign (x, y')))
     
     | AssignBinOp (x, op, y, z) ->
-        let y_const = get_const_value y in
-        let z_const = get_const_value z in
+        let y' = replace_global y in
+        let z' = replace_global z in
+        let y_const = get_const_value y' in
+        let z_const = get_const_value z' in
         (match y_const, z_const with
          | Some n1, Some n2 ->
              (match eval_binop_const op n1 n2 with
@@ -744,29 +751,30 @@ let get_const_value op =
                   Some (Assign (x, Const result))
               | None ->
                   clear_const x;
-                  fold_one_tac inst)
+                  fold_one_tac (AssignBinOp (x, op, y', z')))
          | Some n1, None ->
-             (match simplify_with_const_left op n1 z with
+             (match simplify_with_const_left op n1 z' with
               | Some simplified ->
                   clear_const x;
                   Some (Assign (x, simplified))
               | None ->
                   clear_const x;
-                  fold_one_tac inst)
+                  fold_one_tac (AssignBinOp (x, op, y', z')))
          | None, Some n2 ->
-             (match simplify_with_const_right op y n2 with
+             (match simplify_with_const_right op y' n2 with
               | Some simplified ->
                   clear_const x;
                   Some (Assign (x, simplified))
               | None ->
                   clear_const x;
-                  fold_one_tac inst)
+                  fold_one_tac (AssignBinOp (x, op, y', z')))
          | None, None ->
              clear_const x;
-             fold_one_tac inst)
+             fold_one_tac (AssignBinOp (x, op, y', z')))
     
     | AssignUnOp (x, op, y) ->
-        (match get_const_value y with
+        let y' = replace_global y in
+        (match get_const_value y' with
          | Some n ->
              (match eval_unop_const op n with
               | Some result ->
@@ -774,29 +782,52 @@ let get_const_value op =
                   Some (Assign (x, Const result))
               | None ->
                   clear_const x;
-                  fold_one_tac inst)
+                  fold_one_tac (AssignUnOp (x, op, y')))
          | None ->
              clear_const x;
-             fold_one_tac inst)
+             fold_one_tac (AssignUnOp (x, op, y')))
     
     | Call (dest, _, _) ->
         clear_const dest;
         fold_one_tac inst
     
-    (* ===== 新增：处理 Return 指令 ===== *)
     | Return (Some x) ->
-        (match get_const_value x with
+        let x' = replace_global x in
+        (match get_const_value x' with
          | Some n ->
-             (* 返回值是常量，替换为 Const n *)
              Some (Return (Some (Const n)))
          | None ->
-             fold_one_tac inst)
+             fold_one_tac (Return (Some x')))
     
     | Return None ->
         fold_one_tac inst
     
+    (* ===== 新增：处理常量条件分支 ===== *)
+    | IfGoto (x, l) ->
+        let x' = replace_global x in
+        (match get_const_value x' with
+         | Some n ->
+             if n = 0 then
+               None  (* 条件为假，删除跳转 *)
+             else
+               Some (Goto l)  (* 条件为真，保留跳转 *)
+         | None ->
+             fold_one_tac inst)
+    
+    | IfNotGoto (x, l) ->
+        let x' = replace_global x in
+        (match get_const_value x' with
+         | Some n ->
+             if n = 0 then
+               Some (Goto l)  (* 条件为假，保留跳转 *)
+             else
+               None  (* 条件为真，删除跳转 *)
+         | None ->
+             fold_one_tac inst)
+    
     | _ -> fold_one_tac inst
-   in
+  in
+  
   (* 优化基本块 *)
   let fold_block (b: basic_block) : basic_block =
     let new_instrs = List.fold_left (fun acc inst ->
@@ -956,77 +987,3 @@ let common_subexpression_elimination (prog: ir_program) : ir_program =
 
 
 
-(* ============================================================ *)
-(* 寄存器分配：将变量映射到物理寄存器 *)
-
-(* 物理寄存器类型 *)
-type phys_reg =
-  | T0 | T1 | T2 | T3 | T4 | T5 | T6
-  | A0 | A1 | A2 | A3 | A4 | A5 | A6 | A7
-
-(* 物理寄存器 → 字符串 *)
-let reg_to_string = function
-  | T0 -> "t0" | T1 -> "t1" | T2 -> "t2"
-  | T3 -> "t3" | T4 -> "t4" | T5 -> "t5" | T6 -> "t6"
-  | A0 -> "a0" | A1 -> "a1" | A2 -> "a2" | A3 -> "a3"
-  | A4 -> "a4" | A5 -> "a5" | A6 -> "a6" | A7 -> "a7"
-
-(* 可分配的临时寄存器 *)
-let allocatable_regs = [T0; T1; T2; T3; T4; T5; T6]
-
-(* 寄存器分配器状态 *)
-type reg_alloc_state = {
-  mutable reg_map: (operand, phys_reg) Hashtbl.t;   (* 操作数 → 物理寄存器 *)
-  mutable rev_map: (phys_reg, operand) Hashtbl.t;   (* 物理寄存器 → 操作数 *)
-  mutable free_regs: phys_reg list;                 (* 可用寄存器列表 *)
-  mutable spill_count: int;                         (* 溢出计数器 *)
-}
-
-(* 创建寄存器分配器 *)
-let create_reg_alloc () = {
-  reg_map = Hashtbl.create 32;
-  rev_map = Hashtbl.create 32;
-  free_regs = allocatable_regs;
-  spill_count = 0;
-}
-
-(* 分配一个寄存器 *)
-let alloc_reg alloc =
-  match alloc.free_regs with
-  | reg :: rest ->
-      alloc.free_regs <- rest;
-      reg
-  | [] ->
-      (* 没有空闲寄存器，溢出 T6 *)
-      let reg_to_spill = T6 in
-      match Hashtbl.find_opt alloc.rev_map reg_to_spill with
-      | Some op ->
-          alloc.spill_count <- alloc.spill_count + 1;
-          Hashtbl.remove alloc.reg_map op;
-          Hashtbl.remove alloc.rev_map reg_to_spill;
-          reg_to_spill
-      | None ->
-          reg_to_spill
-
-(* 获取或分配寄存器 *)
-let get_or_alloc_reg alloc op =
-  match Hashtbl.find_opt alloc.reg_map op with
-  | Some reg -> reg
-  | None ->
-      let reg = alloc_reg alloc in
-      Hashtbl.add alloc.reg_map op reg;
-      Hashtbl.add alloc.rev_map reg op;
-      reg
-
-(* 释放寄存器 *)
-let free_reg alloc reg =
-  match Hashtbl.find_opt alloc.rev_map reg with
-  | Some op ->
-      Hashtbl.remove alloc.reg_map op;
-      Hashtbl.remove alloc.rev_map reg;
-      alloc.free_regs <- reg :: alloc.free_regs
-  | None -> ()
-
-(* 检查操作数是否在寄存器中 *)
-let is_in_reg alloc op =
-  Hashtbl.mem alloc.reg_map op
