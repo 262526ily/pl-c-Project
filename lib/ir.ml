@@ -782,9 +782,20 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
         clear_const dest;
         fold_one_tac inst
     
+    (* ===== 新增：处理 Return 指令 ===== *)
+    | Return (Some x) ->
+        (match get_const_value x with
+         | Some n ->
+             (* 返回值是常量，替换为 Const n *)
+             Some (Return (Some (Const n)))
+         | None ->
+             fold_one_tac inst)
+    
+    | Return None ->
+        fold_one_tac inst
+    
     | _ -> fold_one_tac inst
-  in
-  
+   in
   (* 优化基本块 *)
   let fold_block (b: basic_block) : basic_block =
     let new_instrs = List.fold_left (fun acc inst ->
