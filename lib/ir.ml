@@ -635,177 +635,192 @@ let fold_one_tac inst =
 (* 对外接口：对整个 IR 程序做常量折叠与算术优化 *)
 
 let arithmetic_optimize (prog: ir_program) : ir_program =
-    (* 收集所有全局常量 *)
-    let const_env = ref StringMap.empty in
-    List.iter (function
-      | GlobalVar (name, Some value) ->
-          const_env := StringMap.add name value !const_env
-      | _ -> ()
-    ) prog;
+  (* 收集所有全局常量 *)
+  let const_env = ref StringMap.empty in
+  List.iter (function
+    | GlobalVar (name, Some value) ->
+        const_env := StringMap.add name value !const_env
+    | _ -> ()
+  ) prog;
+  
+  (* 简化：当左操作数是常量时 - 直接返回简化后的 operand *)
+  let simplify_with_const_left op const_val right =
+    match op, const_val with
+    | Ast.Add, 0 -> Some right   (* 0 + right = right *)
+    | Ast.Sub, 0 -> 
+        (* 0 - right = -right，需要用 AssignUnOp *)
+        (* 但我们不能在这里返回 UnOp，因为需要的是 operand *)
+        (* 所以返回 None，让 fold_one_tac 处理 *)
+        None
+    | Ast.Mul, 0 -> Some (Const 0)  (* 0 * right = 0 *)
+    | Ast.Mul, 1 -> Some right   (* 1 * right = right *)
+    | Ast.Div, 0 -> None  (* 0 / right = 0，但 right 可能为 0，保留 *)
+    | Ast.And, 0 -> Some (Const 0)  (* 0 && right = 0 *)
+    | Ast.And, 1 -> Some right   (* 1 && right = right *)
+    | Ast.Or, 0 -> Some right    (* 0 || right = right *)
+    | Ast.Or, 1 -> Some (Const 1)   (* 1 || right = 1 *)
+    | _ -> None
+  in
+  
+  (* 简化：当右操作数是常量时 *)
+  let simplify_with_const_right op left const_val =
+    match op, const_val with
+    | Ast.Add, 0 -> Some left    (* left + 0 = left *)
+    | Ast.Sub, 0 -> Some left    (* left - 0 = left *)
+    | Ast.Mul, 0 -> Some (Const 0)  (* left * 0 = 0 *)
+    | Ast.Mul, 1 -> Some left    (* left * 1 = left *)
+    | Ast.Div, 1 -> Some left    (* left / 1 = left *)
+    | Ast.Mod, 1 -> Some (Const 0)  (* left % 1 = 0 *)
+    | Ast.And, 0 -> Some (Const 0)  (* left && 0 = 0 *)
+    | Ast.And, 1 -> Some left    (* left && 1 = left *)
+    | Ast.Or, 0 -> Some left     (* left || 0 = left *)
+    | Ast.Or, 1 -> Some (Const 1)   (* left || 1 = 1 *)
+    | _ -> None
+  in
+  
+  (* 跟踪局部变量的常量值 *)
+  let local_consts = ref StringMap.empty in
+  
+  (* 清除常量跟踪（当变量被重新赋值时） *)
+  let clear_local name =
+    local_consts := StringMap.remove name !local_consts
+  in
+  
+  
+  (* 获取操作数的常量值 *)
+let get_const_value op =
+    match op with
+    | Const n -> Some n
+    | Var name -> 
+        (* 只检查全局常量，不追踪局部变量 *)
+        if StringMap.mem name !const_env then
+          Some (StringMap.find name !const_env)
+        else
+          None
+    | Temp _ -> 
+        None  (* 临时变量不追踪常量 *)
     
-    (* 简化：当左操作数是常量时 - 直接返回简化后的 operand *)
-    let simplify_with_const_left op const_val right =
-      match op, const_val with
-      | Ast.Add, 0 -> Some right
-      | Ast.Sub, 0 -> None
-      | Ast.Mul, 0 -> Some (Const 0)
-      | Ast.Mul, 1 -> Some right
-      | Ast.Div, 0 -> None
-      | Ast.And, 0 -> Some (Const 0)
-      | Ast.And, 1 -> Some right
-      | Ast.Or, 0 -> Some right
-      | Ast.Or, 1 -> Some (Const 1)
-      | _ -> None
-    in
+  in
+  
+  (* 记录常量值 *)
+  let set_local_const op value =
+    match op with
+    | Var name ->
+        local_consts := StringMap.add name value !local_consts
+    | Temp n ->
+        let key = "t" ^ string_of_int n in
+        local_consts := StringMap.add key value !local_consts
+    | _ -> ()
+  in
+  
+  (* 清除操作数的常量状态 *)
+  let clear_const op =
+    match op with
+    | Var name -> clear_local name
+    | Temp n -> clear_local ("t" ^ string_of_int n)
+    | _ -> ()
+  in
+  
+  (* 优化一条指令（带常量传播） *)
+  let fold_with_propagation inst =
+    match inst with
+    | Assign (x, y) ->
+        (match get_const_value y with
+         | Some n ->
+             set_local_const x n;
+             Some (Assign (x, Const n))
+         | None ->
+             clear_const x;
+             fold_one_tac inst)
     
-    (* 简化：当右操作数是常量时 *)
-    let simplify_with_const_right op left const_val =
-      match op, const_val with
-      | Ast.Add, 0 -> Some left
-      | Ast.Sub, 0 -> Some left
-      | Ast.Mul, 0 -> Some (Const 0)
-      | Ast.Mul, 1 -> Some left
-      | Ast.Div, 1 -> Some left
-      | Ast.Mod, 1 -> Some (Const 0)
-      | Ast.And, 0 -> Some (Const 0)
-      | Ast.And, 1 -> Some left
-      | Ast.Or, 0 -> Some left
-      | Ast.Or, 1 -> Some (Const 1)
-      | _ -> None
-    in
+    | AssignBinOp (x, op, y, z) ->
+        let y_const = get_const_value y in
+        let z_const = get_const_value z in
+        (match y_const, z_const with
+         | Some n1, Some n2 ->
+             (match eval_binop_const op n1 n2 with
+              | Some result ->
+                  set_local_const x result;
+                  Some (Assign (x, Const result))
+              | None ->
+                  clear_const x;
+                  fold_one_tac inst)
+         | Some n1, None ->
+             (match simplify_with_const_left op n1 z with
+              | Some simplified ->
+                  clear_const x;
+                  Some (Assign (x, simplified))
+              | None ->
+                  clear_const x;
+                  fold_one_tac inst)
+         | None, Some n2 ->
+             (match simplify_with_const_right op y n2 with
+              | Some simplified ->
+                  clear_const x;
+                  Some (Assign (x, simplified))
+              | None ->
+                  clear_const x;
+                  fold_one_tac inst)
+         | None, None ->
+             clear_const x;
+             fold_one_tac inst)
     
-    (* 获取操作数的常量值 - 检查全局常量和局部常量 *)
-    let get_const_value local_consts op =
-      match op with
-      | Const n -> Some n
-      | Var name -> 
-          (* 先检查全局常量 *)
-          if StringMap.mem name !const_env then
-            Some (StringMap.find name !const_env)
-          else
-            (* 再检查局部常量 *)
-            StringMap.find_opt name local_consts
-      | Temp n -> 
-          let key = "t" ^ string_of_int n in
-          StringMap.find_opt key local_consts
-    in
+    | AssignUnOp (x, op, y) ->
+        (match get_const_value y with
+         | Some n ->
+             (match eval_unop_const op n with
+              | Some result ->
+                  set_local_const x result;
+                  Some (Assign (x, Const result))
+              | None ->
+                  clear_const x;
+                  fold_one_tac inst)
+         | None ->
+             clear_const x;
+             fold_one_tac inst)
     
-    (* 优化一条指令（带常量传播）*)
-    let fold_with_propagation local_consts inst =
-      match inst with
-      | Assign (x, y) ->
-          (match get_const_value local_consts y with
-           | Some n ->
-               (* y 是常量，记录 x 也是常量 *)
-               let new_consts = StringMap.add (match x with Var s -> s | Temp n -> "t" ^ string_of_int n | _ -> "") n local_consts in
-               Some (Assign (x, Const n), new_consts)
-           | None ->
-               (* 清除 x 的常量状态 *)
-               let key = match x with Var s -> s | Temp n -> "t" ^ string_of_int n | _ -> "" in
-               let new_consts = StringMap.remove key local_consts in
-               (match fold_one_tac inst with
-                | Some folded -> Some (folded, new_consts)
-                | None -> Some (inst, new_consts)))
-      
-      | AssignBinOp (x, op, y, z) ->
-          let y_const = get_const_value local_consts y in
-          let z_const = get_const_value local_consts z in
-          let key = match x with Var s -> s | Temp n -> "t" ^ string_of_int n | _ -> "" in
-          (match y_const, z_const with
-           | Some n1, Some n2 ->
-               (* 两个都是常量 → 直接折叠 *)
-               (match eval_binop_const op n1 n2 with
-                | Some result ->
-                    let new_consts = StringMap.add key result local_consts in
-                    Some (Assign (x, Const result), new_consts)
-                | None ->
-                    let new_consts = StringMap.remove key local_consts in
-                    Some (inst, new_consts))
-           | Some n1, None ->
-               (* y 是常量，z 不是 *)
-               (match simplify_with_const_left op n1 z with
-                | Some simplified ->
-                    let new_consts = StringMap.remove key local_consts in
-                    Some (Assign (x, simplified), new_consts)
-                | None ->
-                    let new_consts = StringMap.remove key local_consts in
-                    Some (inst, new_consts))
-           | None, Some n2 ->
-               (* z 是常量，y 不是 *)
-               (match simplify_with_const_right op y n2 with
-                | Some simplified ->
-                    let new_consts = StringMap.remove key local_consts in
-                    Some (Assign (x, simplified), new_consts)
-                | None ->
-                    let new_consts = StringMap.remove key local_consts in
-                    Some (inst, new_consts))
-           | None, None ->
-               let new_consts = StringMap.remove key local_consts in
-               Some (inst, new_consts))
-      
-      | AssignUnOp (x, op, y) ->
-          (match get_const_value local_consts y with
-           | Some n ->
-               (match eval_unop_const op n with
-                | Some result ->
-                    let key = match x with Var s -> s | Temp n -> "t" ^ string_of_int n | _ -> "" in
-                    let new_consts = StringMap.add key result local_consts in
-                    Some (Assign (x, Const result), new_consts)
-                | None ->
-                    let key = match x with Var s -> s | Temp n -> "t" ^ string_of_int n | _ -> "" in
-                    let new_consts = StringMap.remove key local_consts in
-                    Some (inst, new_consts))
-           | None ->
-               let key = match x with Var s -> s | Temp n -> "t" ^ string_of_int n | _ -> "" in
-               let new_consts = StringMap.remove key local_consts in
-               Some (inst, new_consts))
-      
-      | Call (dest, _, _) ->
-          let key = match dest with Var s -> s | Temp n -> "t" ^ string_of_int n | _ -> "" in
-          let new_consts = StringMap.remove key local_consts in
-          Some (inst, new_consts)
-      
-      | Return (Some x) ->
-          (match get_const_value local_consts x with
-           | Some n ->
-               Some (Return (Some (Const n)), local_consts)
-           | None ->
-               Some (inst, local_consts))
-      
-      | Return None ->
-          Some (inst, local_consts)
-      
-      | _ ->
-          Some (inst, local_consts)
-    in
+    | Call (dest, _, _) ->
+        clear_const dest;
+        fold_one_tac inst
     
-    (* 优化基本块 - 带局部常量追踪 *)
-    let fold_block (b: basic_block) : basic_block =
-      let local_consts = ref StringMap.empty in
-      let new_instrs = List.fold_left (fun acc inst ->
-        match fold_with_propagation !local_consts inst with
-        | Some (folded, new_consts) ->
-            local_consts := new_consts;
-            folded :: acc
-        | None ->
-            inst :: acc
-      ) [] b.instrs in
-      { b with instrs = List.rev new_instrs }
-    in
+    (* ===== 新增：处理 Return 指令 ===== *)
+    | Return (Some x) ->
+        (match get_const_value x with
+         | Some n ->
+             (* 返回值是常量，替换为 Const n *)
+             Some (Return (Some (Const n)))
+         | None ->
+             fold_one_tac inst)
     
-    (* 优化函数 *)
-    let fold_func (f: ir_func) : ir_func =
-      { f with
-        entry = fold_block f.entry;
-        blocks = List.map fold_block f.blocks
-      }
-    in
+    | Return None ->
+        fold_one_tac inst
     
-    (* 应用到整个程序 *)
-    List.map (function
-      | Function f -> Function (fold_func f)
-      | GlobalVar _ as g -> g
-    ) prog
+    | _ -> fold_one_tac inst
+   in
+  (* 优化基本块 *)
+  let fold_block (b: basic_block) : basic_block =
+    let new_instrs = List.fold_left (fun acc inst ->
+      match fold_with_propagation inst with
+      | Some folded -> folded :: acc
+      | None -> inst :: acc
+    ) [] b.instrs in
+    { b with instrs = List.rev new_instrs }
+  in
+  
+  (* 优化函数 *)
+  let fold_func (f: ir_func) : ir_func =
+    local_consts := StringMap.empty;
+    { f with
+      entry = fold_block f.entry;
+      blocks = List.map fold_block f.blocks
+    }
+  in
+  
+  (* 应用到整个程序 *)
+  List.map (function
+    | Function f -> Function (fold_func f)
+    | GlobalVar _ as g -> g
+  ) prog
 
 
 
@@ -938,7 +953,6 @@ let common_subexpression_elimination (prog: ir_program) : ir_program =
     | Function f -> Function (cse_func f)
     | GlobalVar _ as g -> g
   ) prog
-
 
 
 
