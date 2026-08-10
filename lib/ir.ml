@@ -629,7 +629,7 @@ let fold_one_tac inst =
        | None -> Some (AssignUnOp (x, op, y)))
 
   (* ===== 13. 无变化 ===== *)
-  | _ -> None
+  | _ -> Some inst 
 
 (* ============================================================ *)
 (* 对外接口：对整个 IR 程序做常量折叠与算术优化 *)
@@ -736,8 +736,8 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
              Some (Assign (x, Const n))
          | None ->
              clear_const x;
-             fold_one_tac (Assign (x, y')))
-    
+             fold_one_tac (Assign (x, y')))   (* 可能返回 None *)
+  
     | AssignBinOp (x, op, y, z) ->
         let y' = replace_global y in
         let z' = replace_global z in
@@ -771,7 +771,7 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
          | None, None ->
              clear_const x;
              fold_one_tac (AssignBinOp (x, op, y', z')))
-    
+  
     | AssignUnOp (x, op, y) ->
         let y' = replace_global y in
         (match get_const_value y' with
@@ -786,57 +786,64 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
          | None ->
              clear_const x;
              fold_one_tac (AssignUnOp (x, op, y')))
-    
+  
+    (* ===== 有副作用的指令：总是保留 ===== *)
     | Call (dest, _, _) ->
         clear_const dest;
-        fold_one_tac inst
-    
+        Some inst
+  
     | Return (Some x) ->
         let x' = replace_global x in
         (match get_const_value x' with
          | Some n ->
              Some (Return (Some (Const n)))
          | None ->
-             fold_one_tac (Return (Some x')))
-    
+             Some (Return (Some x')))
+  
     | Return None ->
-        fold_one_tac inst
-    
-    (* ===== 新增：处理常量条件分支 ===== *)
+        Some inst
+  
+    | Goto _ ->
+        Some inst
+  
+    | Label _ ->
+        Some inst
+  
+    | Param _ ->
+        Some inst
+  
+    (* ===== 常量条件分支 ===== *)
     | IfGoto (x, l) ->
         let x' = replace_global x in
         (match get_const_value x' with
          | Some n ->
              if n = 0 then
-               None  (* 条件为假，删除跳转 *)
+               None   (* 删除跳转 *)
              else
-               Some (Goto l)  (* 条件为真，保留跳转 *)
+               Some (Goto l)
          | None ->
-             fold_one_tac inst)
-    
+             Some inst)   (* 保留原指令 *)
+  
     | IfNotGoto (x, l) ->
         let x' = replace_global x in
         (match get_const_value x' with
          | Some n ->
              if n = 0 then
-               Some (Goto l)  (* 条件为假，保留跳转 *)
+               Some (Goto l)
              else
-               None  (* 条件为真，删除跳转 *)
+               None   (* 删除跳转 *)
          | None ->
-             fold_one_tac inst)
-    
-    | _ -> fold_one_tac inst
-  in
+             Some inst)   (* 保留原指令 *)
   
-  (* 优化基本块 *)
+    
+  in
   let fold_block (b: basic_block) : basic_block =
     let new_instrs = List.fold_left (fun acc inst ->
       match fold_with_propagation inst with
       | Some folded -> folded :: acc
-      | None -> inst :: acc
+      | None -> acc   (* 删除指令 *)
     ) [] b.instrs in
-    { b with instrs = List.rev new_instrs }
-  in
+    { b with instrs = List.rev new_instrs } in
   
   (* 优化函数 *)
   let fold_func (f: ir_func) : ir_func =
