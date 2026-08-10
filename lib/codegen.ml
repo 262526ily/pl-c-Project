@@ -363,7 +363,7 @@ let emit_function (f: ir_func) =
   ) f.params;
   
   let current_args = ref [] in
-  emit_block f.fname f.entry map current_args;
+  List.iter (fun inst -> emit_tac f.fname inst map current_args) f.entry.instrs;
   List.iter (fun b -> emit_block f.fname b map current_args) f.blocks;
   
   Printf.printf ".L_epilogue_%s:\n" f.fname;

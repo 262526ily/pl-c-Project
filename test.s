@@ -7,7 +7,6 @@ test_unused_var:
     sw ra, 28(sp)
     sw fp, 24(sp)
     addi fp, sp, 32
-entry:
     li t0, 10
     sw t0, -20(fp)
     li t0, 20
@@ -34,7 +33,6 @@ test_partial_use:
     sw fp, 40(sp)
     addi fp, sp, 48
     sw a0, -12(fp)
-entry:
     lw t0, -12(fp)
     lw t1, -12(fp)
     add t0, t0, t1
@@ -68,7 +66,6 @@ test_loop_dead:
     sw ra, 44(sp)
     sw fp, 40(sp)
     addi fp, sp, 48
-entry:
     li t0, 0
     sw t0, -24(fp)
     li t0, 0
@@ -119,7 +116,6 @@ test_if_dead:
     sw fp, 56(sp)
     addi fp, sp, 64
     sw a0, -12(fp)
-entry:
     li t0, 0
     sw t0, -32(fp)
     lw t0, -12(fp)
@@ -175,7 +171,6 @@ test_multi_dead:
     sw fp, 56(sp)
     addi fp, sp, 64
     sw a0, -12(fp)
-entry:
     lw t0, -12(fp)
     li t1, 10
     add t0, t0, t1
@@ -221,7 +216,6 @@ main:
     sw ra, 60(sp)
     sw fp, 56(sp)
     addi fp, sp, 64
-entry:
     li t0, 0
     sw t0, -12(fp)
     call test_unused_var
