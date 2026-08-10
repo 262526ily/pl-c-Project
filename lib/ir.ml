@@ -686,18 +686,19 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
     local_consts := StringMap.remove name !local_consts
   in
   
+  
   (* 获取操作数的常量值 *)
-  let get_const_value op =
+let get_const_value op =
     match op with
     | Const n -> Some n
     | Var name -> 
+        (* 只检查全局常量，不追踪局部变量 *)
         if StringMap.mem name !const_env then
           Some (StringMap.find name !const_env)
         else
-          StringMap.find_opt name !local_consts
-    | Temp n -> 
-        let key = "t" ^ string_of_int n in
-        StringMap.find_opt key !local_consts
+          None
+    | Temp _ -> 
+        None  (* 临时变量不追踪常量 *)
     
   in
   
