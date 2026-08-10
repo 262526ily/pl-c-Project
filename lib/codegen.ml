@@ -324,9 +324,22 @@ let emit_tac fname tac_inst map current_args =
 (* ============================================================ *)
 (* 翻译单个基本块 *)
 
+(* 翻译单个基本块 - 遇到跳转指令后停止输出后续指令 *)
 let emit_block fname (b: basic_block) map current_args =
   Printf.printf "%s:\n" b.label;
-  List.iter (fun inst -> emit_tac fname inst map current_args) b.instrs
+  let rec emit_until_terminator = function
+    | [] -> ()
+    | inst :: rest ->
+        emit_tac fname inst map current_args;
+        (* 如果是终止指令，停止输出后续指令 *)
+        match inst with
+        | Return _ | Goto _ ->
+            (* 后续指令是死代码，不输出 *)
+            ()
+        | _ ->
+            emit_until_terminator rest
+  in
+  emit_until_terminator b.instrs
 
 (* ============================================================ *)
 (* 翻译单个函数 *)
@@ -350,7 +363,7 @@ let emit_function (f: ir_func) =
   ) f.params;
   
   let current_args = ref [] in
-  List.iter (fun inst -> emit_tac f.fname inst map current_args) f.entry.instrs;
+  emit_block f.fname f.entry map current_args;
   List.iter (fun b -> emit_block f.fname b map current_args) f.blocks;
   
   Printf.printf ".L_epilogue_%s:\n" f.fname;

@@ -22,10 +22,12 @@ let () =
         exit 1
 
     | Ok ir ->
-        (* 如果开启优化，进行常量折叠和算术优化 *)
+        (* 如果开启优化，进行优化管道 *)
         let optimized_ir =
           if enable_opt then
-            Lib.Ir.arithmetic_optimize ir
+            ir
+            |> Lib.Ir.arithmetic_optimize      (* 常量折叠 + 算术优化 *)
+            (* |> Lib.Ir.dead_code_elimination    死代码删除 *)
           else
             ir
         in

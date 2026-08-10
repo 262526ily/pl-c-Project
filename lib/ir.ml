@@ -821,3 +821,105 @@ let get_const_value op =
     | Function f -> Function (fold_func f)
     | GlobalVar _ as g -> g
   ) prog
+
+
+
+
+(* ============================================================ *)
+(* 优化 Pass：死代码删除（简化版）*)
+
+module VarSet = Set.Make(String)
+
+(* 收集指令中使用的变量 *)
+let used_vars_of_operand op =
+  match op with
+  | Var name -> VarSet.singleton name
+  | Temp _ -> VarSet.empty
+  | Const _ -> VarSet.empty
+
+let used_vars_of_tac inst =
+  match inst with
+  | Assign (_, y) -> used_vars_of_operand y
+  | AssignBinOp (_, _, y, z) ->
+      VarSet.union (used_vars_of_operand y) (used_vars_of_operand z)
+  | AssignUnOp (_, _, y) -> used_vars_of_operand y
+  | IfGoto (x, _) -> used_vars_of_operand x
+  | IfNotGoto (x, _) -> used_vars_of_operand x
+  | Return (Some x) -> used_vars_of_operand x
+  | Call (_, _, _) -> VarSet.empty
+  | Param x -> used_vars_of_operand x
+  | _ -> VarSet.empty
+
+(* 获取指令定义的变量名 *)
+let defined_name_of_tac inst =
+  match inst with
+  | Assign (Var name, _) -> Some name
+  | AssignBinOp (Var name, _, _, _) -> Some name
+  | AssignUnOp (Var name, _, _) -> Some name
+  | Call (Var name, _, _) -> Some name
+  | _ -> None
+
+(* 判断指令是否产生副作用（必须保留）*)
+let has_side_effect inst =
+  match inst with
+  | Call _ -> true   (* 函数调用可能有副作用 *)
+  | Return _ -> true (* 返回指令必须保留 *)
+  | Goto _ -> true   (* 跳转指令必须保留 *)
+  | Label _ -> true  (* 标签必须保留 *)
+  | IfGoto _ -> true (* 条件跳转必须保留 *)
+  | IfNotGoto _ -> true
+  | Param _ -> true  (* 参数传递必须保留 *)
+  | _ -> false
+
+(* 死代码删除：反向扫描基本块，带初始活跃变量 *)
+let dead_code_elimination_block (b: basic_block) (initial_live: VarSet.t) : basic_block * VarSet.t =
+  let rec scan instrs live_vars acc =
+    match instrs with
+    | [] -> (List.rev acc), live_vars
+    | inst :: rest ->
+        let uses = used_vars_of_tac inst in
+        (* 判断指令是否存活 *)
+        let is_live =
+          has_side_effect inst ||
+          match defined_name_of_tac inst with
+          | Some name -> VarSet.mem name live_vars
+          | None -> true
+        in
+        if is_live then
+          let new_live = VarSet.union live_vars uses in
+          let new_live' =
+            match defined_name_of_tac inst with
+            | Some name -> VarSet.remove name new_live
+            | None -> new_live
+          in
+          scan rest new_live' (inst :: acc)
+        else
+          scan rest live_vars acc
+  in
+  let new_instrs, final_live = scan (List.rev b.instrs) initial_live [] in
+  { b with instrs = new_instrs }, final_live
+
+(* 对整个函数做死代码删除 *)
+let dead_code_elimination_func (f: ir_func) : ir_func =
+  (* 初始活跃变量：函数参数 *)
+  let initial_live = 
+    List.fold_left (fun acc name -> VarSet.add name acc) VarSet.empty f.params
+  in
+  let new_entry, live1 = dead_code_elimination_block f.entry initial_live in
+  let new_blocks, _ = 
+    List.fold_left (fun (acc, live) b ->
+      let new_b, new_live = dead_code_elimination_block b live in
+      (new_b :: acc, new_live)
+    ) ([], live1) (List.rev f.blocks)
+  in
+  { f with
+    entry = new_entry;
+    blocks = List.rev new_blocks
+  }
+
+(* 对整个程序做死代码删除 *)
+let dead_code_elimination (prog: ir_program) : ir_program =
+  List.map (function
+    | Function f -> Function (dead_code_elimination_func f)
+    | GlobalVar _ as g -> g
+  ) prog
