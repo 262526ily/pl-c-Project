@@ -826,100 +826,130 @@ let get_const_value op =
 
 
 (* ============================================================ *)
-(* 优化 Pass：死代码删除（简化版）*)
+(* 优化 Pass：公共子表达式消除 (CSE) *)
 
-module VarSet = Set.Make(String)
+module ExprMap = Map.Make(struct
+  type t = string
+  let compare = String.compare
+end)
 
-(* 收集指令中使用的变量 *)
-let used_vars_of_operand op =
-  match op with
-  | Var name -> VarSet.singleton name
-  | Temp _ -> VarSet.empty
-  | Const _ -> VarSet.empty
+(* 表达式键类型 *)
+type expr_key = 
+  | BinOpKey of Ast.binop * string * string   (* op, left_key, right_key *)
+  | UnOpKey of Ast.unop * string              (* op, operand_key *)
 
-let used_vars_of_tac inst =
+(* 获取操作数的键字符串 *)
+let op_key = function
+  | Const n -> "C" ^ string_of_int n
+  | Var name -> "V" ^ name
+  | Temp n -> "T" ^ string_of_int n
+
+(* 从指令生成表达式键 *)
+let get_expr_key inst =
   match inst with
-  | Assign (_, y) -> used_vars_of_operand y
-  | AssignBinOp (_, _, y, z) ->
-      VarSet.union (used_vars_of_operand y) (used_vars_of_operand z)
-  | AssignUnOp (_, _, y) -> used_vars_of_operand y
-  | IfGoto (x, _) -> used_vars_of_operand x
-  | IfNotGoto (x, _) -> used_vars_of_operand x
-  | Return (Some x) -> used_vars_of_operand x
-  | Call (_, _, _) -> VarSet.empty
-  | Param x -> used_vars_of_operand x
-  | _ -> VarSet.empty
-
-(* 获取指令定义的变量名 *)
-let defined_name_of_tac inst =
-  match inst with
-  | Assign (Var name, _) -> Some name
-  | AssignBinOp (Var name, _, _, _) -> Some name
-  | AssignUnOp (Var name, _, _) -> Some name
-  | Call (Var name, _, _) -> Some name
+  | AssignBinOp (_, op, y, z) ->
+      Some (BinOpKey (op, op_key y, op_key z))
+  | AssignUnOp (_, op, y) ->
+      Some (UnOpKey (op, op_key y))
   | _ -> None
 
-(* 判断指令是否产生副作用（必须保留）*)
-let has_side_effect inst =
+(* 将表达式键转为字符串（用于 Map） *)
+let key_to_string = function
+  | BinOpKey (op, l, r) ->
+      let op_str = Ast.(function
+        | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%"
+        | Eq -> "==" | Ne -> "!=" | Lt -> "<" | Gt -> ">" | Le -> "<=" | Ge -> ">="
+        | And -> "&&" | Or -> "||"
+      ) op in
+      Printf.sprintf "(%s %s %s)" l op_str r
+  | UnOpKey (op, x) ->
+      let op_str = Ast.(function Pos -> "+" | Neg -> "-" | Not -> "!") op in
+      Printf.sprintf "(%s %s)" op_str x
+
+(* 获取指令定义的变量 *)
+let get_defined_operand inst =
   match inst with
-  | Call _ -> true   (* 函数调用可能有副作用 *)
-  | Return _ -> true (* 返回指令必须保留 *)
-  | Goto _ -> true   (* 跳转指令必须保留 *)
-  | Label _ -> true  (* 标签必须保留 *)
-  | IfGoto _ -> true (* 条件跳转必须保留 *)
-  | IfNotGoto _ -> true
-  | Param _ -> true  (* 参数传递必须保留 *)
+  | Assign (x, _) -> Some x
+  | AssignBinOp (x, _, _, _) -> Some x
+  | AssignUnOp (x, _, _) -> Some x
+  | Call (x, _, _) -> Some x
+  | _ -> None
+
+(* 检查指令是否定义了一个值（可以被复用）*)
+let is_value_definition inst =
+  match inst with
+  | Assign _ -> true
+  | AssignBinOp _ -> true
+  | AssignUnOp _ -> true
+  | Call _ -> true
   | _ -> false
 
-(* 死代码删除：反向扫描基本块，带初始活跃变量 *)
-let dead_code_elimination_block (b: basic_block) (initial_live: VarSet.t) : basic_block * VarSet.t =
-  let rec scan instrs live_vars acc =
-    match instrs with
-    | [] -> (List.rev acc), live_vars
-    | inst :: rest ->
-        let uses = used_vars_of_tac inst in
-        (* 判断指令是否存活 *)
-        let is_live =
-          has_side_effect inst ||
-          match defined_name_of_tac inst with
-          | Some name -> VarSet.mem name live_vars
-          | None -> true
-        in
-        if is_live then
-          let new_live = VarSet.union live_vars uses in
-          let new_live' =
-            match defined_name_of_tac inst with
-            | Some name -> VarSet.remove name new_live
-            | None -> new_live
+(* 检查操作数是否在表达式中被使用 *)
+let op_used_in_expr op expr_ops =
+  match op with
+  | Var name -> List.exists (function Var n -> n = name | _ -> false) expr_ops
+  | Temp n -> List.exists (function Temp m -> m = n | _ -> false) expr_ops
+  | Const _ -> false
+
+(* 获取表达式中的所有操作数 *)
+let ops_of_expr = function
+  | BinOpKey (_, _, _) -> 
+      (* 从字符串恢复操作数比较困难，所以我们使用原始操作数 *)
+      (* 改为在 CSE 时直接处理 tac 指令 *)
+      []
+  | UnOpKey _ -> []
+
+(* ============================================================ *)
+(* 基本块内公共子表达式消除 *)
+
+let cse_block (b: basic_block) : basic_block =
+    let expr_map = Hashtbl.create 32 in
+    
+    let rec process instrs acc =
+      match instrs with
+      | [] -> List.rev acc
+      | inst :: rest ->
+          let result =
+            match inst with
+            | AssignBinOp (x, op, y, z) ->
+                let key = Printf.sprintf "%s_%s_%s" 
+                  (match op with Ast.Add -> "+" | Ast.Sub -> "-" | Ast.Mul -> "*" | _ -> "?")
+                  (op_key y) (op_key z) in
+                (match Hashtbl.find_opt expr_map key with
+                 | Some existing_def ->
+                     Some (Assign (x, existing_def))
+                 | None ->
+                     Hashtbl.add expr_map key x;
+                     Some inst)
+            | _ -> Some inst
           in
-          scan rest new_live' (inst :: acc)
-        else
-          scan rest live_vars acc
-  in
-  let new_instrs, final_live = scan (List.rev b.instrs) initial_live [] in
-  { b with instrs = new_instrs }, final_live
+          match result with
+          | Some inst' -> process rest (inst' :: acc)
+          | None -> process rest acc
+    in
+    
+    let new_instrs = process b.instrs [] in
+    { b with instrs = new_instrs }
 
-(* 对整个函数做死代码删除 *)
-let dead_code_elimination_func (f: ir_func) : ir_func =
-  (* 初始活跃变量：函数参数 *)
-  let initial_live = 
-    List.fold_left (fun acc name -> VarSet.add name acc) VarSet.empty f.params
-  in
-  let new_entry, live1 = dead_code_elimination_block f.entry initial_live in
-  let new_blocks, _ = 
-    List.fold_left (fun (acc, live) b ->
-      let new_b, new_live = dead_code_elimination_block b live in
-      (new_b :: acc, new_live)
-    ) ([], live1) (List.rev f.blocks)
-  in
-  { f with
-    entry = new_entry;
-    blocks = List.rev new_blocks
-  }
+(* ============================================================ *)
+(* 对整个函数做 CSE（迭代到不动点）*)
 
-(* 对整个程序做死代码删除 *)
-let dead_code_elimination (prog: ir_program) : ir_program =
+let cse_func (f: ir_func) : ir_func =
+  let rec iterate f' =
+    let new_entry = cse_block f'.entry in
+    let new_blocks = List.map cse_block f'.blocks in
+    let result = { f' with entry = new_entry; blocks = new_blocks } in
+    (* 简单迭代：如果块数或指令数变化了，继续迭代 *)
+    if result = f' then result
+    else iterate result
+  in
+  iterate f
+
+(* ============================================================ *)
+(* 对外接口：对整个 IR 程序做公共子表达式消除 *)
+
+let common_subexpression_elimination (prog: ir_program) : ir_program =
   List.map (function
-    | Function f -> Function (dead_code_elimination_func f)
+    | Function f -> Function (cse_func f)
     | GlobalVar _ as g -> g
   ) prog
