@@ -38,36 +38,64 @@ let log2 n =
 let is_imm12 n = n >= -2048 && n <= 2047
 
 (* ============================================================ *)
-(* 辅助函数：常量提取和求值 *)
+(* 安全的偏移量查找 *)
 
-(* 获取操作数的常量值（如果是常量） *)
-let get_const_val_if_const op =
-  match op with
-  | Const n -> Some n
-  | _ -> None
+let find_offset map op =
+  match Hashtbl.find_opt map op with
+  | Some off -> off
+  | None ->
+      match op with
+      | Var name ->
+          Printf.eprintf "Warning: Variable '%s' not found in offset map, treating as global\n" name;
+          -1
+      | Temp t ->
+          Printf.eprintf "Fatal: Temp %d not found in offset map\n" t;
+          exit 1
+      | Const _ ->
+          Printf.eprintf "Fatal: Const should not be in offset map\n";
+          exit 1
 
-(* 简单二元运算常量求值 *)
-let eval_binop_const_simple op n1 n2 =
-  match op with
-  | Ast.Add -> Some (n1 + n2)
-  | Ast.Sub -> Some (n1 - n2)
-  | Ast.Mul -> Some (n1 * n2)
-  | Ast.Div when n2 <> 0 -> Some (n1 / n2)
-  | Ast.Mod when n2 <> 0 -> Some (n1 mod n2)
-  | Ast.Eq -> Some (if n1 = n2 then 1 else 0)
-  | Ast.Ne -> Some (if n1 <> n2 then 1 else 0)
-  | Ast.Lt -> Some (if n1 < n2 then 1 else 0)
-  | Ast.Gt -> Some (if n1 > n2 then 1 else 0)
-  | Ast.Le -> Some (if n1 <= n2 then 1 else 0)
-  | Ast.Ge -> Some (if n1 >= n2 then 1 else 0)
-  | _ -> None
+(* ============================================================ *)
+(* 加载和存储操作数 *)
 
-(* 简单一元运算常量求值 *)
-let eval_unop_const_simple op n =
+let load_op reg op map =
   match op with
-  | Ast.Pos -> Some n
-  | Ast.Neg -> Some (-n)
-  | Ast.Not -> Some (if n = 0 then 1 else 0)
+  | Const n ->
+      Printf.printf "    li %s, %d\n" reg n
+  | Temp t ->
+      if Hashtbl.mem map (Temp t) then
+        let off = Hashtbl.find map (Temp t) in
+        Printf.printf "    lw %s, %d(fp)\n" reg off
+      else (
+        Printf.eprintf "ERROR: Temp %d not found in offset map\n" t;
+        exit 1
+      )
+  | Var name ->
+      if Hashtbl.mem map (Var name) then
+        let off = Hashtbl.find map (Var name) in
+        Printf.printf "    lw %s, %d(fp)\n" reg off
+      else
+        (Printf.printf "    la %s, %s\n" reg name;
+         Printf.printf "    lw %s, 0(%s)\n" reg reg)
+
+let store_op reg op map =
+  match op with
+  | Const _ -> ()
+  | Temp t ->
+      if Hashtbl.mem map (Temp t) then
+        let off = Hashtbl.find map (Temp t) in
+        Printf.printf "    sw %s, %d(fp)\n" reg off
+      else (
+        Printf.eprintf "ERROR: Temp %d not found in offset map for store\n" t;
+        exit 1
+      )
+  | Var name ->
+      if Hashtbl.mem map (Var name) then
+        let off = Hashtbl.find map (Var name) in
+        Printf.printf "    sw %s, %d(fp)\n" reg off
+      else
+        (Printf.printf "    la t3, %s\n" name;
+         Printf.printf "    sw %s, 0(t3)\n" reg)
 
 (* ============================================================ *)
 (* 计算栈槽偏移量映射表 *)
@@ -98,66 +126,6 @@ let compute_offsets (f: ir_func) =
   done;
   
   (!local_slots, map)
-
-(* ============================================================ *)
-(* 安全的偏移量查找 *)
-
-let find_offset map op =
-  match Hashtbl.find_opt map op with
-  | Some off -> off
-  | None ->
-      match op with
-      | Var name ->
-          Printf.eprintf "Warning: Variable '%s' not found in offset map, treating as global\n" name;
-          -1
-      | Temp t ->
-          Printf.eprintf "Fatal: Temp %d not found in offset map\n" t;
-          exit 1
-      | Const _ ->
-          Printf.eprintf "Fatal: Const should not be in offset map\n";
-          exit 1
-
-(* ============================================================ *)
-(* 加载和存储操作数 - 优化版 *)
-
-let load_op reg op map =
-  match op with
-  | Const n ->
-      Printf.printf "    li %s, %d\n" reg n
-  | Temp t ->
-      if Hashtbl.mem map (Temp t) then
-        let off = Hashtbl.find map (Temp t) in
-        Printf.printf "    lw %s, %d(fp)\n" reg off
-      else (
-        Printf.eprintf "ERROR: Temp %d not found in offset map\n" t;
-        exit 1
-      )
-  | Var name ->
-      if Hashtbl.mem map (Var name) then
-        let off = Hashtbl.find map (Var name) in
-        Printf.printf "    lw %s, %d(fp)\n" reg off
-      else
-        (Printf.printf "    la %s, %s\n" reg name;
-         Printf.printf "    lw %s, 0(%s)\n" reg reg)
-
-let store_op reg op map =
-  match op with
-  | Const _ -> ()  (* 常量不需要存储到栈 *)
-  | Temp t ->
-      if Hashtbl.mem map (Temp t) then
-        let off = Hashtbl.find map (Temp t) in
-        Printf.printf "    sw %s, %d(fp)\n" reg off
-      else (
-        Printf.eprintf "ERROR: Temp %d not found in offset map for store\n" t;
-        exit 1
-      )
-  | Var name ->
-      if Hashtbl.mem map (Var name) then
-        let off = Hashtbl.find map (Var name) in
-        Printf.printf "    sw %s, %d(fp)\n" reg off
-      else
-        (Printf.printf "    la t3, %s\n" name;
-         Printf.printf "    sw %s, 0(t3)\n" reg)
 
 (* ============================================================ *)
 (* 生成乘除法优化的代码 *)
@@ -266,26 +234,13 @@ let emit_mod x y z map =
   store_op "t0" x map
 
 (* ============================================================ *)
-(* 翻译单条 TAC 指令 - 优化版 *)
+(* 翻译单条 TAC 指令 *)
 
 let emit_tac fname tac_inst map current_args =
   match tac_inst with
   | Assign (x, y) ->
-      (* 如果 y 是常量，直接存储到目标，不经过 t0 *)
-      (match y with
-       | Const n ->
-           (match x with
-            | Var name when Hashtbl.mem map (Var name) ->
-                let off = Hashtbl.find map (Var name) in
-                Printf.printf "    li t0, %d\n    sw t0, %d(fp)\n" n off
-            | Temp t when Hashtbl.mem map (Temp t) ->
-                let off = Hashtbl.find map (Temp t) in
-                Printf.printf "    li t0, %d\n    sw t0, %d(fp)\n" n off
-            | _ ->
-                Printf.printf "    li a0, %d\n" n)
-       | _ ->
-           load_op "t0" y map;
-           store_op "t0" x map)
+      load_op "t0" y map;
+      store_op "t0" x map
 
   | AssignBinOp (x, op, y, z) ->
       (match op with
@@ -293,54 +248,22 @@ let emit_tac fname tac_inst map current_args =
        | Ast.Div -> emit_div x y z map
        | Ast.Mod -> emit_mod x y z map
        | _ ->
-           (* 检查是否两个操作数都是常量 *)
-           (match get_const_val_if_const y, get_const_val_if_const z with
-            | Some n1, Some n2 ->
-                (match eval_binop_const_simple op n1 n2 with
-                 | Some result ->
-                     (* 直接存储常量结果 *)
-                     (match x with
-                      | Var name when Hashtbl.mem map (Var name) ->
-                          let off = Hashtbl.find map (Var name) in
-                          Printf.printf "    li t0, %d\n    sw t0, %d(fp)\n" result off
-                      | Temp t when Hashtbl.mem map (Temp t) ->
-                          let off = Hashtbl.find map (Temp t) in
-                          Printf.printf "    li t0, %d\n    sw t0, %d(fp)\n" result off
-                      | _ ->
-                          Printf.printf "    li a0, %d\n" result)
-                 | None ->
-                     (* 使用寄存器计算 *)
-                     load_op "t0" y map;
-                     load_op "t1" z map;
-                     (match op with
-                      | Ast.Add -> Printf.printf "    add t0, t0, t1\n"
-                      | Ast.Sub -> Printf.printf "    sub t0, t0, t1\n"
-                      | Ast.Eq  -> Printf.printf "    sub t0, t0, t1\n    sltiu t0, t0, 1\n"
-                      | Ast.Ne  -> Printf.printf "    sub t0, t0, t1\n    sltu t0, zero, t0\n"
-                      | Ast.Lt  -> Printf.printf "    slt t0, t0, t1\n"
-                      | Ast.Gt  -> Printf.printf "    slt t0, t1, t0\n"
-                      | Ast.Le  -> Printf.printf "    slt t0, t1, t0\n    xori t0, t0, 1\n"
-                      | Ast.Ge  -> Printf.printf "    slt t0, t0, t1\n    xori t0, t0, 1\n"
-                      | Ast.And -> Printf.printf "    and t0, t0, t1\n"
-                      | Ast.Or  -> Printf.printf "    or t0, t0, t1\n"
-                      | _ -> ());
-                     store_op "t0" x map)
-            | _ ->
-                load_op "t0" y map;
-                load_op "t1" z map;
-                (match op with
-                 | Ast.Add -> Printf.printf "    add t0, t0, t1\n"
-                 | Ast.Sub -> Printf.printf "    sub t0, t0, t1\n"
-                 | Ast.Eq  -> Printf.printf "    sub t0, t0, t1\n    sltiu t0, t0, 1\n"
-                 | Ast.Ne  -> Printf.printf "    sub t0, t0, t1\n    sltu t0, zero, t0\n"
-                 | Ast.Lt  -> Printf.printf "    slt t0, t0, t1\n"
-                 | Ast.Gt  -> Printf.printf "    slt t0, t1, t0\n"
-                 | Ast.Le  -> Printf.printf "    slt t0, t1, t0\n    xori t0, t0, 1\n"
-                 | Ast.Ge  -> Printf.printf "    slt t0, t0, t1\n    xori t0, t0, 1\n"
-                 | Ast.And -> Printf.printf "    and t0, t0, t1\n"
-                 | Ast.Or  -> Printf.printf "    or t0, t0, t1\n"
-                 | _ -> ());
-                store_op "t0" x map))
+           load_op "t0" y map;
+           load_op "t1" z map;
+           (match op with
+            | Ast.Add -> Printf.printf "    add t0, t0, t1\n"
+            | Ast.Sub -> Printf.printf "    sub t0, t0, t1\n"
+            | Ast.Eq  -> Printf.printf "    sub t0, t0, t1\n    sltiu t0, t0, 1\n"
+            | Ast.Ne  -> Printf.printf "    sub t0, t0, t1\n    sltu t0, zero, t0\n"
+            | Ast.Lt  -> Printf.printf "    slt t0, t0, t1\n"
+            | Ast.Gt  -> Printf.printf "    slt t0, t1, t0\n"
+            | Ast.Le  -> Printf.printf "    slt t0, t1, t0\n    xori t0, t0, 1\n"
+            | Ast.Ge  -> Printf.printf "    slt t0, t0, t1\n    xori t0, t0, 1\n"
+            | Ast.And -> Printf.printf "    and t0, t0, t1\n"
+            | Ast.Or  -> Printf.printf "    or t0, t0, t1\n"
+            | Ast.Mul | Ast.Div | Ast.Mod -> assert false
+           );
+           store_op "t0" x map)
 
   | AssignUnOp (x, op, y) ->
       load_op "t0" y map;
@@ -392,12 +315,7 @@ let emit_tac fname tac_inst map current_args =
       store_op "a0" dest map
 
   | Return (Some x) ->
-      (* 如果返回值是常量，直接加载 *)
-      (match x with
-       | Const n ->
-           Printf.printf "    li a0, %d\n" n
-       | _ ->
-           load_op "a0" x map);
+      load_op "a0" x map;
       Printf.printf "    j .L_epilogue_%s\n" fname
 
   | Return None ->
@@ -406,16 +324,20 @@ let emit_tac fname tac_inst map current_args =
 (* ============================================================ *)
 (* 翻译单个基本块 *)
 
+(* 翻译单个基本块 - 遇到跳转指令后停止输出后续指令 *)
 let emit_block fname (b: basic_block) map current_args =
-  if b.label <> "entry" then
-    Printf.printf "%s:\n" b.label;
+  Printf.printf "%s:\n" b.label;
   let rec emit_until_terminator = function
     | [] -> ()
     | inst :: rest ->
         emit_tac fname inst map current_args;
+        (* 如果是终止指令，停止输出后续指令 *)
         match inst with
-        | Return _ | Goto _ -> ()
-        | _ -> emit_until_terminator rest
+        | Return _ | Goto _ ->
+            (* 后续指令是死代码，不输出 *)
+            ()
+        | _ ->
+            emit_until_terminator rest
   in
   emit_until_terminator b.instrs
 
