@@ -1,3 +1,20 @@
+Semantic check success!
+global A = 10
+global B = 20
+global C = 30
+
+func main():
+  locals: [sum$3, z$2, y$1, x$0]
+  temps: 2
+
+entry:
+  x$0 = A
+  y$1 = B
+  z$2 = C
+  t0 = x$0 + y$1
+  t1 = t0 + z$2
+  sum$3 = t1
+  return sum$3
     .text
 
     .globl A
@@ -18,137 +35,26 @@ B:
 C:
     .word 30
 
-    .globl D
-    .data
-    .align 2
-D:
-    .word 5
-
     .text
     .globl main
 main:
-    addi sp, sp, -160
-    sw ra, 156(sp)
-    sw fp, 152(sp)
-    addi fp, sp, 160
-    li t0, 30
-    sw t0, -60(fp)
-    lw t0, -60(fp)
-    sw t0, -56(fp)
+    addi sp, sp, -32
+    sw ra, 28(sp)
+    sw fp, 24(sp)
+    addi fp, sp, 32
+    li t0, 10
     li t0, 20
-    sw t0, -64(fp)
-    lw t0, -64(fp)
-    sw t0, -52(fp)
-    li t0, 200
-    sw t0, -68(fp)
-    lw t0, -68(fp)
-    sw t0, -48(fp)
-    li t0, 6
-    sw t0, -72(fp)
-    lw t0, -72(fp)
-    sw t0, -44(fp)
-    li t0, 0
-    sw t0, -76(fp)
-    lw t0, -76(fp)
-    sw t0, -40(fp)
     li t0, 30
-    sw t0, -80(fp)
-    lw t0, -80(fp)
-    lw t1, -80(fp)
     add t0, t0, t1
-    sw t0, -84(fp)
-    lw t0, -84(fp)
-    sw t0, -36(fp)
-    li t0, 20
-    sw t0, -88(fp)
-    lw t0, -88(fp)
-    la t1, D
-    lw t1, 0(t1)
-    div t0, t0, t1
-    sw t0, -92(fp)
-    lw t0, -92(fp)
-    sw t0, -32(fp)
-    li t0, 200
-    sw t0, -96(fp)
-    lw t0, -96(fp)
-    la t1, C
-    lw t1, 0(t1)
+    mv t0, t2
+    mv t1, t3
     add t0, t0, t1
-    sw t0, -100(fp)
-    lw t0, -100(fp)
-    sw t0, -28(fp)
-    li t0, 0
-    sw t0, -104(fp)
-    lw t0, -104(fp)
-    sw t0, -24(fp)
-    li t0, 1
-    sw t0, -108(fp)
-    lw t0, -108(fp)
-    sw t0, -20(fp)
-    li t0, 1
-    sw t0, -116(fp)
-    lw t0, -116(fp)
-    sw t0, -112(fp)
-    lw t0, -112(fp)
-    beqz t0, L0
-    li t0, 1
-    sw t0, -120(fp)
-    lw t0, -120(fp)
-    sw t0, -112(fp)
-    j L1
-L0:
-    li t0, 0
-    sw t0, -112(fp)
-L1:
-    lw t0, -112(fp)
-    sw t0, -16(fp)
-    lw t0, -56(fp)
-    lw t1, -52(fp)
-    add t0, t0, t1
-    sw t0, -124(fp)
-    lw t0, -124(fp)
-    lw t1, -48(fp)
-    add t0, t0, t1
-    sw t0, -128(fp)
-    lw t0, -128(fp)
-    lw t1, -44(fp)
-    add t0, t0, t1
-    sw t0, -132(fp)
-    lw t0, -132(fp)
-    lw t1, -40(fp)
-    add t0, t0, t1
-    sw t0, -136(fp)
-    lw t0, -136(fp)
-    lw t1, -36(fp)
-    add t0, t0, t1
-    sw t0, -140(fp)
-    lw t0, -140(fp)
-    lw t1, -32(fp)
-    add t0, t0, t1
-    sw t0, -144(fp)
-    lw t0, -144(fp)
-    lw t1, -28(fp)
-    add t0, t0, t1
-    sw t0, -148(fp)
-    lw t0, -148(fp)
-    lw t1, -24(fp)
-    add t0, t0, t1
-    sw t0, -152(fp)
-    lw t0, -152(fp)
-    lw t1, -20(fp)
-    add t0, t0, t1
-    sw t0, -156(fp)
-    lw t0, -156(fp)
-    lw t1, -16(fp)
-    add t0, t0, t1
-    sw t0, -160(fp)
-    lw t0, -160(fp)
-    sw t0, -12(fp)
-    lw a0, -12(fp)
+    mv t4, t5
+    mv a0, t4
     j .L_epilogue_main
 .L_epilogue_main:
     lw ra, -4(fp)
     lw fp, -8(fp)
-    addi sp, sp, 160
+    addi sp, sp, 32
     ret
 
