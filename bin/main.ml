@@ -29,7 +29,7 @@ let () =
             |> Lib.Ir.arithmetic_optimize      (* 常量折叠 + 算术优化 *)
             |> Lib.Ir.common_subexpression_elimination   (*  CSE *)
             (* |> Lib.Ir.licm_optimize              LICM *)
-            (* |> Lib.Ir.dead_code_elimination    死代码删除 *)
+            (* |> Lib.Ir.dead_code_elimination     *)
           else
             ir
         in

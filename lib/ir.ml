@@ -802,9 +802,11 @@ let get_const_value op =
     let new_instrs = List.fold_left (fun acc inst ->
       match fold_with_propagation inst with
       | Some folded -> folded :: acc
-      | None -> inst :: acc
+      | None ->inst :: acc   (* 保留所有其他指令 *)
     ) [] b.instrs in
     { b with instrs = List.rev new_instrs }
+          
+    
   in
   
   (* 优化函数 *)
