@@ -1,7 +1,7 @@
 (* main.ml *)
 let () =
   (* 检查是否开启了优化 *)
-  let enable_opt = Array.exists (fun s -> s = "-opt") Sys.argv in
+  let enable_opt = Array.exists (fun s -> s = "-opd") Sys.argv in
   
   try
     (* 1. 从标准输入读取 ToyC 源代码 *)
