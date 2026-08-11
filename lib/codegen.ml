@@ -326,7 +326,7 @@ let emit_tac fname tac_inst map current_args =
 
 (* 翻译单个基本块 - 遇到跳转指令后停止输出后续指令 *)
 let emit_block fname (b: basic_block) map current_args =
-  if b.label <> "entry" then
+  (* if b.label <> "entry" then *)
    Printf.printf "%s:\n" b.label;
   let rec emit_until_terminator = function
     | [] -> ()
