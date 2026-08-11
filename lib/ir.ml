@@ -957,3 +957,80 @@ let common_subexpression_elimination (prog: ir_program) : ir_program =
     | GlobalVar _ as g -> g
   ) prog
 
+(* ============================================================ *)
+(* 优化 Pass：尾递归优化 *)
+
+(* 遍历所有操作数 *)
+let iter_operands f = function
+  | Assign (x, y) -> f x; f y
+  | AssignBinOp (x, _, a, b) -> f x; f a; f b
+  | AssignUnOp (x, _, a) -> f x; f a
+  | IfGoto (a, _) | IfNotGoto (a, _) -> f a
+  | Param a -> f a
+  | Call (x, _, _) -> f x
+  | Return (Some a) -> f a
+  | Goto _ | Label _ | Return None -> ()
+
+(* 统计临时变量数量 *)
+let count_temps instrs =
+  let m = ref (-1) in
+  List.iter (iter_operands (function
+    | Temp t -> if t > !m then m := t
+    | _ -> ())) instrs;
+  !m + 1
+
+(* 对单个函数做尾递归优化 *)
+let tail_recursion (f: ir_func) (instrs: tac list) : tac list =
+  let fname = f.fname in
+  let params = f.params in
+  let nparams = List.length params in
+  let entry_label = f.entry.label in
+  let is_param o = match o with Var v -> List.mem v params | _ -> false in
+  let tmp = ref (count_temps instrs) in
+  let fresh () = let t = !tmp in incr tmp; Temp t in
+  
+  let rec loop acc = function
+    | [] -> List.rev acc
+    | (Param o :: rest) as instrs when nparams > 0 ->
+        let rec collect k acc_ps = function
+          | (Param p) :: r when k > 0 -> collect (k - 1) (p :: acc_ps) r
+          | r -> List.rev acc_ps, r
+        in
+        let ps, after = collect nparams [] instrs in
+        (match after with
+         | Call (d, callee, n) :: Return (Some d') :: rest'
+           when callee = fname && n = nparams
+             && List.length ps = nparams && d = d' ->
+             let args = List.rev ps in
+             let copies =
+               List.map (fun a -> if is_param a then Some (fresh ()) else None) args
+             in
+             let pre =
+               List.concat
+                 (List.map2 (fun a c ->
+                    match c with Some t -> [Assign (t, a)] | None -> [])
+                    args copies)
+             in
+             let assigns =
+               List.map2 (fun p (c, a) ->
+                 Assign (Var p, match c with Some t -> t | None -> a))
+                 params (List.combine copies args)
+             in
+             loop (List.rev_append (pre @ assigns @ [Goto entry_label]) acc) rest'
+         | _ -> loop (Param o :: acc) rest)
+    | Call (d, callee, 0) :: Return (Some d') :: rest
+      when callee = fname && nparams = 0 && d = d' ->
+        loop (Goto entry_label :: acc) rest
+    | i :: rest -> loop (i :: acc) rest
+  in
+  loop [] instrs
+
+(* 对外接口：对整个程序做尾递归优化 *)
+let tail_recursion_optimize (prog: ir_program) : ir_program =
+  List.map (function
+    | Function f ->
+        let new_instrs = tail_recursion f f.entry.instrs in
+        let new_entry = { f.entry with instrs = new_instrs } in
+        Function { f with entry = new_entry }
+    | GlobalVar _ as g -> g
+  ) prog
