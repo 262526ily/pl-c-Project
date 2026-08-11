@@ -1,20 +1,3 @@
-Semantic check success!
-global A = 10
-global B = 20
-global C = 30
-
-func main():
-  locals: [sum$3, z$2, y$1, x$0]
-  temps: 2
-
-entry:
-  x$0 = A
-  y$1 = B
-  z$2 = C
-  t0 = x$0 + y$1
-  t1 = t0 + z$2
-  sum$3 = t1
-  return sum$3
     .text
 
     .globl A
@@ -35,6 +18,18 @@ B:
 C:
     .word 30
 
+    .globl D
+    .data
+    .align 2
+D:
+    .word 40
+
+    .globl E
+    .data
+    .align 2
+E:
+    .word 50
+
     .text
     .globl main
 main:
@@ -43,14 +38,16 @@ main:
     sw fp, 24(sp)
     addi fp, sp, 32
     li t0, 10
+    sw t0, -28(fp)
     li t0, 20
+    sw t0, -24(fp)
     li t0, 30
-    add t0, t0, t1
-    mv t0, t2
-    mv t1, t3
-    add t0, t0, t1
-    mv t4, t5
-    mv a0, t4
+    sw t0, -20(fp)
+    li t0, 40
+    sw t0, -16(fp)
+    li t0, 50
+    sw t0, -12(fp)
+    lw a0, -12(fp)
     j .L_epilogue_main
 .L_epilogue_main:
     lw ra, -4(fp)
