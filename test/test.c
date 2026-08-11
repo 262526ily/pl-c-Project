@@ -1,16 +1,19 @@
-// test_if_false.tc
-// 测试条件为假时的死代码删除
-
-const int A = 10;
-const int B = 5;
+/// fib_recursive.tc
+int fib(int n) {
+    int result=0;
+    if (n <= 1) {
+        result = n;
+    } else {
+        int n1 = n - 1;
+        int n2 = n - 2;
+        int f1 = fib(n1);
+        int f2 = fib(n2);
+        result = f1 + f2;
+    }
+    return result;
+}
 
 int main() {
-    int x = A;           // 10
-    int y = B;           // 5
-    
-    if (x < y) {         // 10 < 5 = false
-        return x;        // 永远不会执行
-    } else {
-        return y;        // 执行这个
-    }
+    int x = fib(8);
+    return x;  // 21
 }
