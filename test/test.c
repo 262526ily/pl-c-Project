@@ -1,12 +1,18 @@
-// test_void.tc
-// 测试 void 函数的 return
-
-void foo() {
-    int x = 10;
-    return;          // void return
-}
+// test_licm_2.tc
+const int A = 10;
+const int B = 20;
+const int C = 30;
+const int N = 50;
 
 int main() {
-    foo();
-    return 42;
+    int sum = 0;
+    int i = 0;
+    int step = A + B;        // 30（不变量）
+    int limit = N + C;       // 80（不变量）
+    
+    while (i < limit) {
+        sum = sum + step;
+        i = i + 1;
+    }
+    return sum;              // 80 * 30 = 2400
 }
