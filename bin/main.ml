@@ -37,8 +37,8 @@ let () =
         
         (* 【修改】注释掉原本的 IR 打印和成功提示 *)
         
-        Printf.printf "Semantic check success!\n";
-        Lib.Ir.dump_ir ir ;
+        (* Printf.printf "Semantic check success!\n";
+        Lib.Ir.dump_ir ir ; *)
         (* 【关键】直接调用汇编代码生成器，将 RV32I 汇编流打印到标准输出 *)
         Lib.Codegen.generate_riscv optimized_ir
     );
