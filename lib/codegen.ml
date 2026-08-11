@@ -1,27 +1,6 @@
 (* lib/codegen.ml *)
 open Ir
 
-(* 物理寄存器池 *)
-let phys_regs = ["t0"; "t1"; "t2"; "t3"; "t4"; "t5"; "t6"]
-
-(* 虚拟寄存器 → 物理寄存器 映射 *)
-let vreg_map = Hashtbl.create 32
-let next_phys = ref 0
-
-let reset_vreg_map () =
-  Hashtbl.clear vreg_map;
-  next_phys := 0
-
-let get_phys_for_vreg vreg =
-  let key = string_of_int vreg in
-  match Hashtbl.find_opt vreg_map key with
-  | Some reg -> reg
-  | None ->
-      let reg = List.nth phys_regs (!next_phys mod List.length phys_regs) in
-      next_phys := !next_phys + 1;
-      Hashtbl.add vreg_map key reg;
-      reg
-
 (* 唯一标签计数器 *)
 let inline_label_counter = ref 0
 
@@ -59,6 +38,66 @@ let log2 n =
 let is_imm12 n = n >= -2048 && n <= 2047
 
 (* ============================================================ *)
+(* 安全的偏移量查找 *)
+
+let find_offset map op =
+  match Hashtbl.find_opt map op with
+  | Some off -> off
+  | None ->
+      match op with
+      | Var name ->
+          Printf.eprintf "Warning: Variable '%s' not found in offset map, treating as global\n" name;
+          -1
+      | Temp t ->
+          Printf.eprintf "Fatal: Temp %d not found in offset map\n" t;
+          exit 1
+      | Const _ ->
+          Printf.eprintf "Fatal: Const should not be in offset map\n";
+          exit 1
+
+(* ============================================================ *)
+(* 加载和存储操作数 *)
+
+let load_op reg op map =
+  match op with
+  | Const n ->
+      Printf.printf "    li %s, %d\n" reg n
+  | Temp t ->
+      if Hashtbl.mem map (Temp t) then
+        let off = Hashtbl.find map (Temp t) in
+        Printf.printf "    lw %s, %d(fp)\n" reg off
+      else (
+        Printf.eprintf "ERROR: Temp %d not found in offset map\n" t;
+        exit 1
+      )
+  | Var name ->
+      if Hashtbl.mem map (Var name) then
+        let off = Hashtbl.find map (Var name) in
+        Printf.printf "    lw %s, %d(fp)\n" reg off
+      else
+        (Printf.printf "    la %s, %s\n" reg name;
+         Printf.printf "    lw %s, 0(%s)\n" reg reg)
+
+let store_op reg op map =
+  match op with
+  | Const _ -> ()
+  | Temp t ->
+      if Hashtbl.mem map (Temp t) then
+        let off = Hashtbl.find map (Temp t) in
+        Printf.printf "    sw %s, %d(fp)\n" reg off
+      else (
+        Printf.eprintf "ERROR: Temp %d not found in offset map for store\n" t;
+        exit 1
+      )
+  | Var name ->
+      if Hashtbl.mem map (Var name) then
+        let off = Hashtbl.find map (Var name) in
+        Printf.printf "    sw %s, %d(fp)\n" reg off
+      else
+        (Printf.printf "    la t3, %s\n" name;
+         Printf.printf "    sw %s, 0(t3)\n" reg)
+
+(* ============================================================ *)
 (* 计算栈槽偏移量映射表 *)
 
 let compute_offsets (f: ir_func) =
@@ -87,60 +126,6 @@ let compute_offsets (f: ir_func) =
   done;
   
   (!local_slots, map)
-
-(* ============================================================ *)
-(* 加载和存储操作数 *)
-
-(* 获取操作数所在的物理寄存器，避免不必要的 mv *)
-let get_phys_for_op op =
-  match op with
-  | VReg vreg -> Some (get_phys_for_vreg vreg)
-  | _ -> None
-
-(* 加载操作数到寄存器 - 优化版 *)
-let load_op reg op map =
-  match op with
-  | Const n ->
-      Printf.printf "    li %s, %d\n" reg n
-  | VReg vreg ->
-      let phys = get_phys_for_vreg vreg in
-      if phys <> reg then
-        Printf.printf "    mv %s, %s\n" reg phys
-  | Temp t ->
-      if Hashtbl.mem map (Temp t) then
-        let off = Hashtbl.find map (Temp t) in
-        Printf.printf "    lw %s, %d(fp)\n" reg off
-      else (
-        Printf.eprintf "ERROR: Temp %d not found in offset map\n" t;
-        exit 1
-      )
-  | Var name ->
-      if Hashtbl.mem map (Var name) then
-        let off = Hashtbl.find map (Var name) in
-        Printf.printf "    lw %s, %d(fp)\n" reg off
-      else
-        (Printf.printf "    la %s, %s\n" reg name;
-         Printf.printf "    lw %s, 0(%s)\n" reg reg)
-
-let store_op reg op map =
-  match op with
-  | Const _ -> ()
-  | VReg _ -> ()
-  | Temp t ->
-      if Hashtbl.mem map (Temp t) then
-        let off = Hashtbl.find map (Temp t) in
-        Printf.printf "    sw %s, %d(fp)\n" reg off
-      else (
-        Printf.eprintf "ERROR: Temp %d not found in offset map for store\n" t;
-        exit 1
-      )
-  | Var name ->
-      if Hashtbl.mem map (Var name) then
-        let off = Hashtbl.find map (Var name) in
-        Printf.printf "    sw %s, %d(fp)\n" reg off
-      else
-        (Printf.printf "    la t3, %s\n" name;
-         Printf.printf "    sw %s, 0(t3)\n" reg)
 
 (* ============================================================ *)
 (* 生成乘除法优化的代码 *)
@@ -233,8 +218,10 @@ let emit_mod x y z map =
     else if is_power_of_two n then
       let mask = n - 1 in
       if is_imm12 mask then
+        (* 小掩码：用 andi（一条指令） *)
         Printf.printf "    andi t0, t0, %d\n" mask
       else
+        (* 大掩码：用 li + and（两条指令） *)
         (Printf.printf "    li t1, %d\n" mask;
          Printf.printf "    and t0, t0, t1\n")
     else
@@ -247,21 +234,13 @@ let emit_mod x y z map =
   store_op "t0" x map
 
 (* ============================================================ *)
-(* 翻译单条 TAC 指令 - 优化版 *)
+(* 翻译单条 TAC 指令 *)
 
 let emit_tac fname tac_inst map current_args =
   match tac_inst with
   | Assign (x, y) ->
-      (* 如果 y 是 VReg，直接复制到 x 的物理寄存器 *)
-      (match x, y with
-       | VReg vx, VReg vy ->
-           let px = get_phys_for_vreg vx in
-           let py = get_phys_for_vreg vy in
-           if px <> py then
-             Printf.printf "    mv %s, %s\n" px py
-       | _, _ ->
-           load_op "t0" y map;
-           store_op "t0" x map)
+      load_op "t0" y map;
+      store_op "t0" x map
 
   | AssignBinOp (x, op, y, z) ->
       (match op with
@@ -345,16 +324,20 @@ let emit_tac fname tac_inst map current_args =
 (* ============================================================ *)
 (* 翻译单个基本块 *)
 
+(* 翻译单个基本块 - 遇到跳转指令后停止输出后续指令 *)
 let emit_block fname (b: basic_block) map current_args =
-  if b.label <> "entry" then
-    Printf.printf "%s:\n" b.label;
+  Printf.printf "%s:\n" b.label;
   let rec emit_until_terminator = function
     | [] -> ()
     | inst :: rest ->
         emit_tac fname inst map current_args;
+        (* 如果是终止指令，停止输出后续指令 *)
         match inst with
-        | Return _ | Goto _ -> ()
-        | _ -> emit_until_terminator rest
+        | Return _ | Goto _ ->
+            (* 后续指令是死代码，不输出 *)
+            ()
+        | _ ->
+            emit_until_terminator rest
   in
   emit_until_terminator b.instrs
 
@@ -362,8 +345,6 @@ let emit_block fname (b: basic_block) map current_args =
 (* 翻译单个函数 *)
 
 let emit_function (f: ir_func) =
-  reset_vreg_map ();
-  
   let slots, map = compute_offsets f in
   let framesize = ((8 + slots * 4 + 15) / 16) * 16 in
   

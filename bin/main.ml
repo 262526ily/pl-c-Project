@@ -28,7 +28,7 @@ let () =
             ir
             |> Lib.Ir.arithmetic_optimize      (* 常量折叠 + 算术优化 *)
             |> Lib.Ir.common_subexpression_elimination   (*  CSE *)
-            |> Lib.Ir.register_allocation
+            (* |> Lib.Ir.register_allocation *)
             (* |> Lib.Ir.licm_optimize              LICM *)
             (* |> Lib.Ir.dead_code_elimination     *)
           else
