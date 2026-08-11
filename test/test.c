@@ -1,16 +1,16 @@
-// test_if_const.tc
-// 测试常量条件分支
+// test_if_false.tc
+// 测试条件为假时的死代码删除
 
 const int A = 10;
 const int B = 5;
 
 int main() {
-    int x = A;           // x = 10
-    int y = B;           // y = 5
+    int x = A;           // 10
+    int y = B;           // 5
     
-    if (x > y) {         // 10 > 5 = true
-        return 100;
+    if (x < y) {         // 10 < 5 = false
+        return x;        // 永远不会执行
     } else {
-        return 200;
+        return y;        // 执行这个
     }
 }
