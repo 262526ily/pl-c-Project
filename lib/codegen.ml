@@ -262,53 +262,164 @@ let emit_mod x y z map reg_map =
      Printf.printf "    rem t0, t0, t1\n");
   store_op "t0" x map reg_map
 
+(* ---------- register-direct codegen helpers ---------- *)
+
+let operand_reg op reg_map =
+  match op with
+  | Const _ -> None
+  | Var _ | Temp _ -> Hashtbl.find_opt reg_map op
+
+let emit_assign x y map reg_map =
+  match y with
+  | Const n ->
+      (match operand_reg x reg_map with
+       | Some rx -> Printf.printf "    li %s, %d\n" rx n
+       | None ->
+           Printf.printf "    li t0, %d\n" n;
+           store_op "t0" x map reg_map)
+  | Var _ | Temp _ ->
+      (match operand_reg x reg_map, operand_reg y reg_map with
+       | Some rx, Some ry ->
+           if rx <> ry then Printf.printf "    mv %s, %s\n" rx ry
+       | Some rx, None ->
+           load_op rx y map reg_map
+       | None, Some ry ->
+           store_op ry x map reg_map
+       | None, None ->
+           load_op "t0" y map reg_map;
+           store_op "t0" x map reg_map)
+
+let emit_unop x op y map reg_map =
+  match op with
+  | Ast.Pos -> emit_assign x y map reg_map
+  | Ast.Neg | Ast.Not as unop ->
+      let op_instr =
+        match unop with
+        | Ast.Neg -> "neg"
+        | Ast.Not -> "seqz"
+        | Ast.Pos -> assert false
+      in
+      (match operand_reg x reg_map, y with
+       | Some rx, (Var _ | Temp _) ->
+           (match operand_reg y reg_map with
+            | Some ry -> Printf.printf "    %s %s, %s\n" op_instr rx ry
+            | None ->
+                load_op rx y map reg_map;
+                Printf.printf "    %s %s, %s\n" op_instr rx rx)
+       | None, (Var _ | Temp _) ->
+           (match operand_reg y reg_map with
+            | Some ry ->
+                Printf.printf "    %s t0, %s\n" op_instr ry;
+                store_op "t0" x map reg_map
+            | None ->
+                load_op "t0" y map reg_map;
+                Printf.printf "    %s t0, t0\n" op_instr;
+                store_op "t0" x map reg_map)
+       | Some rx, Const n ->
+           Printf.printf "    li t0, %d\n" n;
+           Printf.printf "    %s %s, t0\n" op_instr rx
+       | None, Const n ->
+           Printf.printf "    li t0, %d\n" n;
+           Printf.printf "    %s t0, t0\n" op_instr;
+           store_op "t0" x map reg_map)
+
+let emit_reg_binop dest op y z map reg_map =
+  let src_reg op fallback =
+    match operand_reg op reg_map with
+    | Some r -> r
+    | None -> load_op fallback op map reg_map; fallback
+  in
+  let ry = src_reg y "t0" in
+  let rz = src_reg z "t1" in
+  match op with
+  | Ast.Add -> Printf.printf "    add %s, %s, %s\n" dest ry rz
+  | Ast.Sub -> Printf.printf "    sub %s, %s, %s\n" dest ry rz
+  | Ast.Mul -> Printf.printf "    mul %s, %s, %s\n" dest ry rz
+  | Ast.Div -> Printf.printf "    div %s, %s, %s\n" dest ry rz
+  | Ast.Mod -> Printf.printf "    rem %s, %s, %s\n" dest ry rz
+  | Ast.And -> Printf.printf "    and %s, %s, %s\n" dest ry rz
+  | Ast.Or -> Printf.printf "    or %s, %s, %s\n" dest ry rz
+  | Ast.Eq ->
+      Printf.printf "    sub %s, %s, %s\n" dest ry rz;
+      Printf.printf "    sltiu %s, %s, 1\n" dest dest
+  | Ast.Ne ->
+      Printf.printf "    sub %s, %s, %s\n" dest ry rz;
+      Printf.printf "    sltu %s, zero, %s\n" dest dest
+  | Ast.Lt -> Printf.printf "    slt %s, %s, %s\n" dest ry rz
+  | Ast.Gt -> Printf.printf "    slt %s, %s, %s\n" dest rz ry
+  | Ast.Le ->
+      Printf.printf "    slt %s, %s, %s\n" dest rz ry;
+      Printf.printf "    xori %s, %s, 1\n" dest dest
+  | Ast.Ge ->
+      Printf.printf "    slt %s, %s, %s\n" dest ry rz;
+      Printf.printf "    xori %s, %s, 1\n" dest dest
+
+let dest_reg x reg_map =
+  match operand_reg x reg_map with Some rx -> rx | None -> "t0"
+
+let emit_add_imm x y imm map reg_map =
+  let dest = dest_reg x reg_map in
+  (match operand_reg y reg_map with
+   | Some ry -> Printf.printf "    addi %s, %s, %d\n" dest ry imm
+   | None ->
+       load_op dest y map reg_map;
+       Printf.printf "    addi %s, %s, %d\n" dest dest imm);
+  if operand_reg x reg_map = None then store_op dest x map reg_map
+
+let emit_binop x op y z map reg_map =
+  match op with
+  | Ast.Add
+    when is_const_op y && not (is_const_op z)
+         && is_imm12 (get_const_val y) ->
+      emit_add_imm x z (get_const_val y) map reg_map
+  | Ast.Add
+    when is_const_op z && not (is_const_op y)
+         && is_imm12 (get_const_val z) ->
+      emit_add_imm x y (get_const_val z) map reg_map
+  | Ast.Sub
+    when is_const_op z && not (is_const_op y)
+         && is_imm12 (- (get_const_val z)) ->
+      emit_add_imm x y (- (get_const_val z)) map reg_map
+  | Ast.Mul | Ast.Div | Ast.Mod
+    when not (is_const_op y) && not (is_const_op z) ->
+      let dest = dest_reg x reg_map in
+      emit_reg_binop dest op y z map reg_map;
+      if operand_reg x reg_map = None then store_op dest x map reg_map
+  | Ast.Mul -> emit_mul x y z map reg_map
+  | Ast.Div -> emit_div x y z map reg_map
+  | Ast.Mod -> emit_mod x y z map reg_map
+  | _ ->
+      let dest = dest_reg x reg_map in
+      emit_reg_binop dest op y z map reg_map;
+      if operand_reg x reg_map = None then store_op dest x map reg_map
+
 let emit_tac fname tac_inst map reg_map current_args =
   match tac_inst with
   | Assign (x, y) ->
-      load_op "t0" y map reg_map;
-      store_op "t0" x map reg_map
+      emit_assign x y map reg_map
 
   | AssignBinOp (x, op, y, z) ->
-      (match op with
-       | Ast.Mul -> emit_mul x y z map reg_map
-       | Ast.Div -> emit_div x y z map reg_map
-       | Ast.Mod -> emit_mod x y z map reg_map
-       | _ ->
-           load_op "t0" y map reg_map;
-           load_op "t1" z map reg_map;
-           (match op with
-            | Ast.Add -> Printf.printf "    add t0, t0, t1\n"
-            | Ast.Sub -> Printf.printf "    sub t0, t0, t1\n"
-            | Ast.Eq  -> Printf.printf "    sub t0, t0, t1\n    sltiu t0, t0, 1\n"
-            | Ast.Ne  -> Printf.printf "    sub t0, t0, t1\n    sltu t0, zero, t0\n"
-            | Ast.Lt  -> Printf.printf "    slt t0, t0, t1\n"
-            | Ast.Gt  -> Printf.printf "    slt t0, t1, t0\n"
-            | Ast.Le  -> Printf.printf "    slt t0, t1, t0\n    xori t0, t0, 1\n"
-            | Ast.Ge  -> Printf.printf "    slt t0, t0, t1\n    xori t0, t0, 1\n"
-            | Ast.And -> Printf.printf "    and t0, t0, t1\n"
-            | Ast.Or  -> Printf.printf "    or t0, t0, t1\n"
-            | Ast.Mul | Ast.Div | Ast.Mod -> assert false
-           );
-           store_op "t0" x map reg_map)
+      emit_binop x op y z map reg_map
 
   | AssignUnOp (x, op, y) ->
-      load_op "t0" y map reg_map;
-      (match op with
-       | Ast.Pos -> ()
-       | Ast.Neg -> Printf.printf "    neg t0, t0\n"
-       | Ast.Not -> Printf.printf "    seqz t0, t0\n");
-      store_op "t0" x map reg_map
+      emit_unop x op y map reg_map
 
   | Goto l ->
       Printf.printf "    j %s\n" l
 
   | IfGoto (x, l) ->
-      load_op "t0" x map reg_map;
-      Printf.printf "    bnez t0, %s\n" l
+      (match operand_reg x reg_map with
+       | Some rx -> Printf.printf "    bnez %s, %s\n" rx l
+       | None ->
+           load_op "t0" x map reg_map;
+           Printf.printf "    bnez t0, %s\n" l)
 
   | IfNotGoto (x, l) ->
-      load_op "t0" x map reg_map;
-      Printf.printf "    beqz t0, %s\n" l
+      (match operand_reg x reg_map with
+       | Some rx -> Printf.printf "    beqz %s, %s\n" rx l
+       | None ->
+           load_op "t0" x map reg_map;
+           Printf.printf "    beqz t0, %s\n" l)
 
   | Label l ->
       Printf.printf "%s:\n" l
@@ -346,7 +457,6 @@ let emit_tac fname tac_inst map reg_map current_args =
 
   | Return None ->
       Printf.printf "    j .L_epilogue_%s\n" fname
-
 let emit_block fname (b: basic_block) map reg_map current_args =
   if b.label <> "entry" then
    Printf.printf "%s:\n" b.label;
@@ -367,25 +477,68 @@ let emit_function (f: ir_func) =
 
   let reg_pool = ["s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8"; "s9"; "s10"; "s11"] in
 
-  (* 按静态使用频率分配被调用者保存寄存器，优先缓存最常用的局部变量/临时值 *)
-  let use_count = Hashtbl.create 64 in
-  let bump op =
-    let n = (match Hashtbl.find_opt use_count op with Some n -> n | None -> 0) in
-    Hashtbl.replace use_count op (n + 1)
+  (* Loop-aware frequency allocation: weight a use by 10^(estimated loop depth).
+     Deeper loops dominate the register budget, which keeps hot induction and
+     accumulation variables in callee-saved registers without ever sharing a
+     physical register between two logical values. *)
+  let blocks_order = f.entry :: f.blocks in
+  let blocks_array = Array.of_list blocks_order in
+  let label_to_index = Hashtbl.create 16 in
+  Array.iteri (fun i b -> Hashtbl.replace label_to_index b.label i) blocks_array;
+  let depths = Array.make (Array.length blocks_array) 0 in
+  let collect_targets instrs =
+    List.fold_left (fun acc -> function
+      | Goto l -> l :: acc
+      | IfGoto (_, l) | IfNotGoto (_, l) -> l :: acc
+      | _ -> acc)
+      [] instrs
   in
-  let bump_instr = function
-    | Assign (x, y) -> bump x; bump y
-    | AssignBinOp (x, _, y, z) -> bump x; bump y; bump z
-    | AssignUnOp (x, _, y) -> bump x; bump y
-    | IfGoto (x, _) | IfNotGoto (x, _) -> bump x
-    | Param x -> bump x
-    | Call (x, _, _) -> bump x
-    | Return (Some x) -> bump x
+  let back_edges = ref [] in
+  Array.iteri (fun i b ->
+    List.iter (fun l ->
+      match Hashtbl.find_opt label_to_index l with
+      | Some j when j <= i -> back_edges := (j, i) :: !back_edges
+      | _ -> ())
+      (collect_targets b.instrs))
+    blocks_array;
+  let back_edges_sorted =
+    List.sort
+      (fun (a1, b1) (a2, b2) -> compare (b1 - a1) (b2 - a2))
+      !back_edges
+  in
+  List.iter (fun (h, t) ->
+    let m = ref 0 in
+    for k = h to t do
+      if depths.(k) > !m then m := depths.(k)
+    done;
+    for k = h to t do
+      if depths.(k) < !m + 1 then depths.(k) <- !m + 1
+    done)
+    back_edges_sorted;
+  let weight_for_depth d =
+    let rec loop n acc = if n <= 0 then acc else loop (n - 1) (acc * 10) in
+    loop d 1
+  in
+
+  let use_count = Hashtbl.create 64 in
+  let bump op weight =
+    let n = (match Hashtbl.find_opt use_count op with Some n -> n | None -> 0) in
+    Hashtbl.replace use_count op (n + weight)
+  in
+  let bump_instr weight = function
+    | Assign (x, y) -> bump x weight; bump y weight
+    | AssignBinOp (x, _, y, z) -> bump x weight; bump y weight; bump z weight
+    | AssignUnOp (x, _, y) -> bump x weight; bump y weight
+    | IfGoto (x, _) | IfNotGoto (x, _) -> bump x weight
+    | Param x -> bump x weight
+    | Call (x, _, _) -> bump x weight
+    | Return (Some x) -> bump x weight
     | Goto _ | Label _ | Return None -> ()
   in
-  let bump_block (b: basic_block) = List.iter bump_instr b.instrs in
-  bump_block f.entry;
-  List.iter bump_block f.blocks;
+  Array.iteri (fun i b ->
+    let weight = weight_for_depth depths.(i) in
+    List.iter (bump_instr weight) b.instrs)
+    blocks_array;
 
   let rec range a b =
     if a > b then [] else a :: range (a + 1) b

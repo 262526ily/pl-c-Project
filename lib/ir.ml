@@ -701,15 +701,11 @@ let get_const_value op =
     match op with
     | Const n -> Some n
     | Var name ->
-        if String.contains name '$' then
-          (try Some (StringMap.find name !local_consts) with Not_found -> None)
-        else if StringMap.mem name !const_env then
+        if StringMap.mem name !const_env then
           Some (StringMap.find name !const_env)
         else
           None
-    | Temp n ->
-        (try Some (StringMap.find ("t" ^ string_of_int n) !local_consts)
-         with Not_found -> None)
+    | Temp _ -> None
   in
   
   (* 记录常量值 *)
