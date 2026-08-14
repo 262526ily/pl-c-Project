@@ -121,7 +121,7 @@ let allocate_registers (f: ir_func) reg_pool =
 
   let linear_instrs =
     let acc = ref [] in
-    let add_block b =
+    let add_block (b: basic_block) =
       let rec loop = function
         | [] -> ()
         | ((Goto _ | Return _) as i) :: _ ->
