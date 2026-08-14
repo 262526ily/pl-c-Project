@@ -366,6 +366,16 @@ let emit_add_imm x y imm map reg_map =
        Printf.printf "    addi %s, %s, %d\n" dest dest imm);
   if operand_reg x reg_map = None then store_op dest x map reg_map
 
+let emit_imm_cmp x y imm invert map reg_map =
+  let dest = dest_reg x reg_map in
+  (match operand_reg y reg_map with
+   | Some ry -> Printf.printf "    slti %s, %s, %d\n" dest ry imm
+   | None ->
+       load_op dest y map reg_map;
+       Printf.printf "    slti %s, %s, %d\n" dest dest imm);
+  if invert then Printf.printf "    xori %s, %s, 1\n" dest dest;
+  if operand_reg x reg_map = None then store_op dest x map reg_map
+
 let emit_binop x op y z map reg_map =
   match op with
   | Ast.Add
@@ -380,6 +390,22 @@ let emit_binop x op y z map reg_map =
     when is_const_op z && not (is_const_op y)
          && is_imm12 (- (get_const_val z)) ->
       emit_add_imm x y (- (get_const_val z)) map reg_map
+  | Ast.Lt
+    when is_const_op z && not (is_const_op y)
+         && is_imm12 (get_const_val z) ->
+      emit_imm_cmp x y (get_const_val z) false map reg_map
+  | Ast.Ge
+    when is_const_op z && not (is_const_op y)
+         && is_imm12 (get_const_val z) ->
+      emit_imm_cmp x y (get_const_val z) true map reg_map
+  | Ast.Le
+    when is_const_op z && not (is_const_op y)
+         && is_imm12 ((get_const_val z) + 1) ->
+      emit_imm_cmp x y ((get_const_val z) + 1) false map reg_map
+  | Ast.Gt
+    when is_const_op z && not (is_const_op y)
+         && is_imm12 ((get_const_val z) + 1) ->
+      emit_imm_cmp x y ((get_const_val z) + 1) true map reg_map
   | Ast.Mul | Ast.Div | Ast.Mod
     when not (is_const_op y) && not (is_const_op z) ->
       let dest = dest_reg x reg_map in
@@ -392,7 +418,6 @@ let emit_binop x op y z map reg_map =
       let dest = dest_reg x reg_map in
       emit_reg_binop dest op y z map reg_map;
       if operand_reg x reg_map = None then store_op dest x map reg_map
-
 let emit_tac fname tac_inst map reg_map current_args =
   match tac_inst with
   | Assign (x, y) ->
@@ -475,71 +500,30 @@ let emit_block fname (b: basic_block) map reg_map current_args =
 let emit_function (f: ir_func) =
   let slots, map = compute_offsets f in
 
-  let reg_pool = ["s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8"; "s9"; "s10"; "s11"] in
-
-  (* Loop-aware frequency allocation: weight a use by 10^(estimated loop depth).
-     Deeper loops dominate the register budget, which keeps hot induction and
-     accumulation variables in callee-saved registers without ever sharing a
-     physical register between two logical values. *)
-  let blocks_order = f.entry :: f.blocks in
-  let blocks_array = Array.of_list blocks_order in
-  let label_to_index = Hashtbl.create 16 in
-  Array.iteri (fun i b -> Hashtbl.replace label_to_index b.label i) blocks_array;
-  let depths = Array.make (Array.length blocks_array) 0 in
-  let collect_targets instrs =
-    List.fold_left (fun acc -> function
-      | Goto l -> l :: acc
-      | IfGoto (_, l) | IfNotGoto (_, l) -> l :: acc
-      | _ -> acc)
-      [] instrs
+  let has_calls =
+    List.exists
+      (fun (b: basic_block) ->
+        List.exists (function Call _ -> true | _ -> false) b.instrs)
+      (f.entry :: f.blocks)
   in
-  let back_edges = ref [] in
-  Array.iteri (fun i (b: basic_block) ->
-    List.iter (fun l ->
-      match Hashtbl.find_opt label_to_index l with
-      | Some j when j <= i -> back_edges := (j, i) :: !back_edges
-      | _ -> ())
-      (collect_targets b.instrs))
+  let reg_pool =
+    if has_calls then
+      ["s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8"; "s9"; "s10"; "s11"]
+    else
+      ["s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8"; "s9"; "s10"; "s11";
+       "a1"; "a2"; "a3"; "a4"; "a5"; "a6"; "a7"; "t4"; "t5"; "t6"]
+  in
+
+  (* Liveness-based linear-scan allocation: build CFG live-in/live-out sets,
+     derive conservative live intervals, then assign physical registers by
+     interval overlap and farthest-end spilling. *)
+  let blocks_order : basic_block list = f.entry :: f.blocks in
+  let blocks_array : basic_block array = Array.of_list blocks_order in
+  let label_to_index : (string, int) Hashtbl.t = Hashtbl.create 16 in
+  Array.iteri (fun i b ->
+    Hashtbl.replace label_to_index b.label i;
+    List.iter (function Label l -> Hashtbl.replace label_to_index l i | _ -> ()) b.instrs)
     blocks_array;
-  let back_edges_sorted =
-    List.sort
-      (fun (a1, b1) (a2, b2) -> compare (b1 - a1) (b2 - a2))
-      !back_edges
-  in
-  List.iter (fun (h, t) ->
-    let m = ref 0 in
-    for k = h to t do
-      if depths.(k) > !m then m := depths.(k)
-    done;
-    for k = h to t do
-      if depths.(k) < !m + 1 then depths.(k) <- !m + 1
-    done)
-    back_edges_sorted;
-  let weight_for_depth d =
-    let rec loop n acc = if n <= 0 then acc else loop (n - 1) (acc * 10) in
-    loop d 1
-  in
-
-  let use_count = Hashtbl.create 64 in
-  let bump op weight =
-    let n = (match Hashtbl.find_opt use_count op with Some n -> n | None -> 0) in
-    Hashtbl.replace use_count op (n + weight)
-  in
-  let bump_instr weight = function
-    | Assign (x, y) -> bump x weight; bump y weight
-    | AssignBinOp (x, _, y, z) -> bump x weight; bump y weight; bump z weight
-    | AssignUnOp (x, _, y) -> bump x weight; bump y weight
-    | IfGoto (x, _) | IfNotGoto (x, _) -> bump x weight
-    | Param x -> bump x weight
-    | Call (x, _, _) -> bump x weight
-    | Return (Some x) -> bump x weight
-    | Goto _ | Label _ | Return None -> ()
-  in
-  Array.iteri (fun i (b: basic_block) ->
-    let weight = weight_for_depth depths.(i) in
-    List.iter (bump_instr weight) b.instrs)
-    blocks_array;
-
   let rec range a b =
     if a > b then [] else a :: range (a + 1) b
   in
@@ -548,28 +532,271 @@ let emit_function (f: ir_func) =
     @ List.map (fun name -> Var name) f.locals
     @ List.map (fun t -> Temp t) (range 0 (f.temps - 1))
   in
-  let compare_candidates a b =
-    let ca = (match Hashtbl.find_opt use_count a with Some n -> n | None -> 0) in
-    let cb = (match Hashtbl.find_opt use_count b with Some n -> n | None -> 0) in
-    if ca <> cb then compare cb ca else compare a b
+  let cand_array : operand array = Array.of_list candidates in
+  let ncand : int = Array.length cand_array in
+  let operand_index : (operand, int) Hashtbl.t = Hashtbl.create 64 in
+  List.iteri (fun i op -> Hashtbl.replace operand_index op i) candidates;
+  let idx_of op = Hashtbl.find_opt operand_index op in
+  let reachable_instrs (b: basic_block) =
+    let rec take = function
+      | [] -> []
+      | (Goto _ as i) :: _ -> [i]
+      | (Return _ as i) :: _ -> [i]
+      | i :: rest -> i :: take rest
+    in
+    take b.instrs
   in
-  let sorted_candidates = List.sort compare_candidates candidates in
 
-  let reg_map = Hashtbl.create 32 in
-  let used_regs = ref [] in
-  let rec assign_pool regs = function
-    | [] -> ()
-    | _ when regs = [] -> ()
-    | op :: rest ->
-        (match regs with
-         | r :: rs ->
-             Hashtbl.replace reg_map op r;
-             used_regs := r :: !used_regs;
-             assign_pool rs rest
-         | [] -> ())
+  let defs_of_inst = function
+    | Assign (x, _) -> [x]
+    | AssignBinOp (x, _, _, _) -> [x]
+    | AssignUnOp (x, _, _) -> [x]
+    | Call (x, _, _) -> [x]
+    | _ -> []
   in
-  assign_pool reg_pool sorted_candidates;
-  let used_regs_list = List.rev !used_regs in  let saved_count = List.length used_regs_list in
+  let uses_of_inst = function
+    | Assign (_, y) -> [y]
+    | AssignBinOp (_, _, y, z) -> [y; z]
+    | AssignUnOp (_, _, y) -> [y]
+    | IfGoto (x, _) | IfNotGoto (x, _) -> [x]
+    | Param x -> [x]
+    | Return (Some x) -> [x]
+    | Goto _ | Label _ | Call _ | Return None -> []
+  in
+
+  let nb : int = Array.length blocks_array in
+  let preds : int list array = Array.make nb [] in
+  let collect_branch_targets instrs =
+    List.fold_left (fun acc -> function
+      | IfGoto (_, l) | IfNotGoto (_, l) -> l :: acc
+      | _ -> acc)
+      [] instrs
+  in
+  Array.iteri (fun i (b: basic_block) ->
+      let tail_succ =
+        match List.rev (reachable_instrs b) with
+        | Goto l :: _ ->
+            (match Hashtbl.find_opt label_to_index l with
+             | Some j -> [j]
+             | None -> [])
+        | IfGoto (_, l) :: _ | IfNotGoto (_, l) :: _ ->
+            let branch =
+              match Hashtbl.find_opt label_to_index l with
+              | Some j -> [j]
+              | None -> []
+            in
+            (if i + 1 < nb then (i + 1) :: branch else branch)
+        | Return _ :: _ -> []
+        | _ ->
+            (if i + 1 < nb then [i + 1] else [])
+      in
+      let branch_succ =
+        List.filter_map
+          (fun l -> Hashtbl.find_opt label_to_index l)
+          (collect_branch_targets (reachable_instrs b))
+      in
+      let succ =
+        List.fold_left
+          (fun acc j -> if List.mem j acc then acc else acc @ [j])
+          [] (tail_succ @ branch_succ)
+      in
+      List.iter (fun j -> preds.(j) <- i :: preds.(j)) succ)
+    blocks_array;
+
+  let block_def : bool array array = Array.init nb (fun _ -> Array.make ncand false) in
+  let block_use : bool array array = Array.init nb (fun _ -> Array.make ncand false) in
+  let mark_ops ops bits =
+    List.iter (fun op ->
+        match idx_of op with
+        | Some k -> bits.(k) <- true
+        | None -> ())
+      ops
+  in
+  Array.iteri (fun i (b: basic_block) ->
+      List.iter (fun inst ->
+          mark_ops (defs_of_inst inst) block_def.(i);
+          mark_ops (uses_of_inst inst) block_use.(i))
+        (reachable_instrs b))
+    blocks_array;
+
+  let live_in : bool array array = Array.init nb (fun _ -> Array.make ncand false) in
+  let live_out : bool array array = Array.init nb (fun _ -> Array.make ncand false) in
+  let compute_live_in b =
+    let out = live_out.(b) in
+    let defs = block_def.(b) in
+    let uses = block_use.(b) in
+    let res = Array.copy out in
+    for k = 0 to ncand - 1 do if defs.(k) then res.(k) <- false done;
+    for k = 0 to ncand - 1 do if uses.(k) then res.(k) <- true done;
+    res
+  in
+  let bits_equal a b =
+    let rec go k =
+      if k >= ncand then true
+      else if a.(k) <> b.(k) then false
+      else go (k + 1)
+    in
+    go 0
+  in
+  let union_into dst src =
+    for k = 0 to ncand - 1 do if src.(k) then dst.(k) <- true done
+  in
+  let queue = ref [] in
+  for i = 0 to nb - 1 do queue := i :: !queue done;
+  while !queue <> [] do
+    let b = List.hd !queue in
+    queue := List.tl !queue;
+    let new_live_in = compute_live_in b in
+    if not (bits_equal new_live_in live_in.(b)) then begin
+      live_in.(b) <- new_live_in;
+      List.iter (fun p ->
+          union_into live_out.(p) new_live_in;
+          if not (List.mem p !queue) then queue := p :: !queue)
+        preds.(b)
+    end
+  done;
+
+  let instr_arrays : tac array array =
+    Array.map (fun (b: basic_block) -> Array.of_list (reachable_instrs b)) blocks_array
+  in
+  let block_start : int array = Array.make nb 0 in
+  let next_pos = ref 0 in
+  for i = 0 to nb - 1 do
+    block_start.(i) <- !next_pos;
+    next_pos := !next_pos + Array.length instr_arrays.(i)
+  done;
+
+  let first : int array = Array.make ncand max_int in
+  let last : int array = Array.make ncand (-1) in
+  let record k p =
+    if p < first.(k) then first.(k) <- p;
+    if p > last.(k) then last.(k) <- p
+  in
+  for i = nb - 1 downto 0 do
+    let arr = instr_arrays.(i) in
+    let live_after = ref (Array.copy live_out.(i)) in
+    for j = Array.length arr - 1 downto 0 do
+      let p = block_start.(i) + j in
+      let inst = arr.(j) in
+      let defs = defs_of_inst inst in
+      let uses = uses_of_inst inst in
+      let cur = !live_after in
+      List.iter (fun op ->
+          match idx_of op with
+          | Some k -> record k p
+          | None -> ())
+        uses;
+      List.iter (fun op ->
+          match idx_of op with
+          | Some k -> if cur.(k) then record k p
+          | None -> ())
+        defs;
+      let next = Array.copy cur in
+      List.iter (fun op ->
+          match idx_of op with
+          | Some k -> next.(k) <- false
+          | None -> ())
+        defs;
+      List.iter (fun op ->
+          match idx_of op with
+          | Some k -> next.(k) <- true
+          | None -> ())
+        uses;
+      live_after := next
+    done
+  done;
+
+  (* Loop-carried live values are live through the whole loop body in source
+     order (the backedge jumps backwards), so extend their intervals across
+     every backedge whose header they are live-in to.  This keeps register
+     sharing sound even though the source order is not a topological order of
+     the CFG. *)
+  for h = 0 to nb - 1 do
+    List.iter (fun p ->
+        if h <= p then
+          let loop_start = block_start.(h) in
+          let loop_end = block_start.(p) + Array.length instr_arrays.(p) - 1 in
+          for k = 0 to ncand - 1 do
+            if live_in.(h).(k) then begin
+              if loop_start < first.(k) then first.(k) <- loop_start;
+              if loop_end > last.(k) then last.(k) <- loop_end
+            end
+          done)
+      preds.(h)
+  done;
+
+  let intervals : (int * int * operand) list ref = ref [] in
+  for k = 0 to ncand - 1 do
+    if last.(k) >= 0 then begin
+      let op = cand_array.(k) in
+      let start =
+        match op with
+        | Var name when List.mem name f.params -> 0
+        | _ -> if first.(k) = max_int then 0 else first.(k)
+      in
+      intervals := (start, last.(k), op) :: !intervals
+    end
+  done;
+  let intervals_sorted =
+    List.sort (fun (s1, _, _) (s2, _, _) -> compare s1 s2) !intervals
+  in
+
+  let reg_map : (operand, string) Hashtbl.t = Hashtbl.create 32 in
+  let reg_used : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  let active : (int * string * operand) list ref = ref [] in
+  let find_free active =
+    let rec go = function
+      | [] -> None
+      | r :: rest ->
+          if List.exists (fun (_, ar, _) -> ar = r) active then go rest
+          else Some r
+    in
+    go reg_pool
+  in
+  let expire s active =
+    List.filter (fun (e, _, _) -> e >= s) active
+  in
+  let assign op r =
+    Hashtbl.replace reg_map op r;
+    Hashtbl.replace reg_used r ()
+  in
+  let spill_farthest active =
+    let rec go best = function
+      | [] -> best
+      | ((ae, _, _) as item) :: rest ->
+          let (be, _, _) = best in
+          if ae > be then go item rest else go best rest
+    in
+    match active with
+    | [] -> (0, "", Var "")
+    | hd :: _ -> go hd active
+  in
+  List.iter (fun (s, e, op) ->
+      let cur_active = expire s !active in
+      match find_free cur_active with
+      | Some r ->
+          assign op r;
+          active := (e, r, op) :: cur_active
+      | None ->
+          if cur_active <> [] then begin
+            let (maxe, maxr, maxop) = spill_farthest cur_active in
+            if maxe > e then begin
+              Hashtbl.remove reg_map maxop;
+              active :=
+                (e, maxr, op)
+                :: List.filter (fun (_, _, o) -> o <> maxop) cur_active;
+              assign op maxr
+            end
+          end)
+    intervals_sorted;
+
+  let used_regs_list =
+    List.filter (fun r -> Hashtbl.mem reg_used r) reg_pool
+  in
+  let saved_regs =
+    List.filter (fun r -> String.length r > 0 && r.[0] = 's') used_regs_list
+  in
+  let saved_count = List.length saved_regs in
   let framesize = ((8 + slots * 4 + saved_count * 4 + 15) / 16) * 16 in
 
   Printf.printf "    .globl %s\n" f.fname;
@@ -583,20 +810,23 @@ let emit_function (f: ir_func) =
   List.iteri (fun i r ->
       let off = -8 - 4 * (slots + i + 1) in
       Printf.printf "    sw %s, %d(fp)\n" r off)
-    used_regs_list;
+    saved_regs;
 
   List.iteri (fun i name ->
-      let op = Var name in
-      match Hashtbl.find_opt reg_map op with
+      if i < 8 then
+        let off = Hashtbl.find map (Var name) in
+        Printf.printf "    sw a%d, %d(fp)\n" i off)
+    f.params;
+
+  List.iteri (fun i name ->
+      match Hashtbl.find_opt reg_map (Var name) with
       | Some r ->
           if i < 8 then
-            Printf.printf "    mv %s, a%d\n" r i
+            let off = Hashtbl.find map (Var name) in
+            Printf.printf "    lw %s, %d(fp)\n" r off
           else
             Printf.printf "    lw %s, %d(fp)\n" r ((i - 8) * 4)
-      | None ->
-          if i < 8 then
-            let off = Hashtbl.find map (Var name) in
-            Printf.printf "    sw a%d, %d(fp)\n" i off)
+      | None -> ())
     f.params;
 
   let current_args = ref [] in
@@ -607,7 +837,7 @@ let emit_function (f: ir_func) =
   List.iteri (fun i r ->
       let off = -8 - 4 * (slots + i + 1) in
       Printf.printf "    lw %s, %d(fp)\n" r off)
-    used_regs_list;
+    saved_regs;
   Printf.printf "    lw ra, -4(fp)\n";
   Printf.printf "    lw fp, -8(fp)\n";
   Printf.printf "    addi sp, sp, %d\n" framesize;

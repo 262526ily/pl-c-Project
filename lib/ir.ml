@@ -837,7 +837,441 @@ let get_const_value op =
     | GlobalVar _ as g -> g
   ) prog
 (* ============================================================ *)
+(* ?? Pass????????????? *)
+(* ?????????????????????????????????? *)
+
+let propagate_entry_constants (prog: ir_program) : ir_program =
+  let global_const_env = ref StringMap.empty in
+  List.iter (function
+    | GlobalVar (name, Some value, true) ->
+        global_const_env := StringMap.add name value !global_const_env
+    | _ -> ()) prog;
+
+  let key_of_op = function
+    | Var name -> name
+    | Temp t -> "t" ^ string_of_int t
+    | Const n -> "const" ^ string_of_int n
+  in
+  let lookup map op =
+    match op with
+    | Const _ -> None
+    | Var name -> (try Some (StringMap.find name map) with Not_found -> None)
+    | Temp t -> (try Some (StringMap.find ("t" ^ string_of_int t) map) with Not_found -> None)
+  in
+  let resolve map op =
+    match lookup map op with
+    | Some n -> Const n
+    | None -> op
+  in
+  let remove map op =
+    match op with
+    | Var name -> StringMap.remove name map
+    | Temp t -> StringMap.remove ("t" ^ string_of_int t) map
+    | Const _ -> map
+  in
+  let process map inst =
+    let inst' =
+      match inst with
+      | Assign (x, y) -> Assign (x, resolve map y)
+      | AssignBinOp (x, op, y, z) ->
+          AssignBinOp (x, op, resolve map y, resolve map z)
+      | AssignUnOp (x, op, y) ->
+          AssignUnOp (x, op, resolve map y)
+      | IfGoto (x, l) -> IfGoto (resolve map x, l)
+      | IfNotGoto (x, l) -> IfNotGoto (resolve map x, l)
+      | Param x -> Param (resolve map x)
+      | Return (Some x) -> Return (Some (resolve map x))
+      | other -> other
+    in
+    match fold_one_tac inst' with
+    | Some folded -> folded
+    | None -> inst'
+  in
+  let defined_operand = function
+    | Assign (x, _) | AssignBinOp (x, _, _, _)
+    | AssignUnOp (x, _, _) | Call (x, _, _) -> Some x
+    | _ -> None
+  in
+  let update_after_def safe map folded =
+    match defined_operand folded with
+    | None -> map
+    | Some x ->
+        (match folded with
+         | Assign (x', Const n) when x' = x && safe (key_of_op x) ->
+             StringMap.add (key_of_op x) n map
+         | _ -> remove map x)
+  in
+  let build_entry safe map instrs =
+    List.fold_left (fun (map, acc) inst ->
+      let folded = process map inst in
+      let map' = update_after_def safe map folded in
+      (map', folded :: acc))
+      (map, []) instrs
+  in
+  let count_defs instrs counts =
+    List.iter (fun inst ->
+      match defined_operand inst with
+      | None -> ()
+      | Some x ->
+          let key = key_of_op x in
+          let n = (match (try Some (StringMap.find key counts) with Not_found -> None) with Some n -> n | None -> 0) in
+          counts := StringMap.add key (n + 1) !counts)
+      instrs
+  in
+
+  List.map (function
+    | GlobalVar _ as g -> g
+    | Function f ->
+        let def_counts = ref StringMap.empty in
+        count_defs f.entry.instrs def_counts;
+        List.iter (fun (b: basic_block) -> count_defs b.instrs def_counts) f.blocks;
+        let safe key =
+          match (try Some (StringMap.find key !def_counts) with Not_found -> None) with
+          | Some 1 -> true
+          | _ -> false
+        in
+        let entry_map, rev_entry = build_entry safe !global_const_env f.entry.instrs in
+        let new_entry = { f.entry with instrs = List.rev rev_entry } in
+        let new_blocks =
+          List.map (fun (b: basic_block) ->
+            { b with instrs = List.map (process entry_map) b.instrs })
+            f.blocks
+        in
+        Function { f with entry = new_entry; blocks = new_blocks })
+    prog
+
+(* ============================================================ *)
+(* ============================================================ *)
+(* ?? Pass????????? *)
+(* ??????????????????????????????????? *)
+
+let fold_pure_calls (prog: ir_program) : ir_program =
+  let funcs : (string, ir_func) Hashtbl.t = Hashtbl.create 16 in
+  List.iter (function Function f -> Hashtbl.replace funcs f.fname f | _ -> ()) prog;
+
+  let is_localish f op =
+    match op with
+    | Var name -> List.mem name f.params || List.mem name f.locals
+    | Temp _ -> true
+    | Const _ -> true
+  in
+  let pure_single_block f =
+    f.blocks = [] &&
+    List.for_all (fun inst ->
+      match inst with
+      | Assign (x, y) -> is_localish f x && is_localish f y
+      | AssignBinOp (x, _, y, z) ->
+          is_localish f x && is_localish f y && is_localish f z
+      | AssignUnOp (x, _, y) -> is_localish f x && is_localish f y
+      | Return (Some x) -> is_localish f x
+      | _ -> false)
+      f.entry.instrs
+  in
+  let key_of_op op =
+    match op with
+    | Var name -> name
+    | Temp t -> "t" ^ string_of_int t
+    | Const n -> "const" ^ string_of_int n
+  in
+  let eval_const f const_args =
+    if not (pure_single_block f) then None
+    else if List.length const_args <> List.length f.params then None
+    else begin
+      let env = Hashtbl.create 16 in
+      List.iter2 (fun name value -> Hashtbl.replace env name value) f.params const_args;
+      let eval_op op =
+        match op with
+        | Const n -> Some n
+        | Var name ->
+            (try Some (Hashtbl.find env name) with Not_found -> None)
+        | Temp t ->
+            (try Some (Hashtbl.find env ("t" ^ string_of_int t)) with Not_found -> None)
+      in
+      let rec run = function
+        | [] -> None
+        | Return (Some x) :: _ -> eval_op x
+        | Assign (x, y) :: rest ->
+            (match eval_op y with
+             | Some n -> Hashtbl.replace env (key_of_op x) n; run rest
+             | None -> None)
+        | AssignBinOp (x, op, y, z) :: rest ->
+            (match eval_op y, eval_op z with
+             | Some n1, Some n2 ->
+                 (match eval_binop_const op n1 n2 with
+                  | Some n -> Hashtbl.replace env (key_of_op x) n; run rest
+                  | None -> None)
+             | _ -> None)
+        | AssignUnOp (x, op, y) :: rest ->
+            (match eval_op y with
+             | Some n ->
+                 (match eval_unop_const op n with
+                  | Some n -> Hashtbl.replace env (key_of_op x) n; run rest
+                  | None -> None)
+             | None -> None)
+        | _ -> None
+      in
+      run f.entry.instrs
+    end
+  in
+  let try_fold_call callee args =
+    if not (List.for_all is_const args) then None
+    else
+      let values = List.map get_const args in
+      match Hashtbl.find_opt funcs callee with
+      | Some f -> eval_const f values
+      | None -> None
+  in
+  let fold_block instrs =
+    let rec collect rev_args = function
+      | Param y :: rest -> collect (y :: rev_args) rest
+      | rest -> (List.rev rev_args, rest)
+    in
+    let rec go acc = function
+      | [] -> List.rev acc
+      | Param _ :: _ as instrs ->
+          let args, rest = collect [] instrs in
+          (match rest with
+           | Call (dest, callee, n) :: rest'
+             when List.length args = n ->
+               let orig_args = args in
+               (match try_fold_call callee orig_args with
+                | Some c -> go (Assign (dest, Const c) :: acc) rest'
+                | None ->
+                    let params = List.map (fun a -> Param a) args in
+                    go (Call (dest, callee, n) :: List.rev_append params acc) rest')
+           | _ ->
+               let params = List.map (fun a -> Param a) args in
+               go (List.rev_append params acc) rest)
+      | inst :: rest -> go (inst :: acc) rest
+    in
+    go [] instrs
+  in
+
+  List.map (function
+    | GlobalVar _ as g -> g
+    | Function f ->
+        Function
+          { f with
+            entry = { f.entry with instrs = fold_block f.entry.instrs };
+            blocks = List.map (fun (b: basic_block) ->
+              { b with instrs = fold_block b.instrs }) f.blocks })
+    prog
+
 (* 优化 Pass：公共子表达式消除 (CSE) *)
+
+(* ============================================================ *)
+(* Loop-invariant code motion (LICM).                             *)
+(* Only handles structured while loops with a backedge Goto, and  *)
+(* requires the block before the loop header to fall through to    *)
+(* the header, so hoisted code can be appended without new blocks. *)
+(* ============================================================ *)
+
+let loop_invariant_hoist (prog: ir_program) : ir_program =
+  let uses_of_inst = function
+    | Assign (_, y) -> [y]
+    | AssignBinOp (_, _, y, z) -> [y; z]
+    | AssignUnOp (_, _, y) -> [y]
+    | IfGoto (x, _) | IfNotGoto (x, _) -> [x]
+    | Param x -> [x]
+    | Return (Some x) -> [x]
+    | _ -> []
+  in
+  let def_of_inst = function
+    | Assign (x, _) | AssignBinOp (x, _, _, _)
+    | AssignUnOp (x, _, _) | Call (x, _, _) -> Some x
+    | _ -> None
+  in
+  let reachable_instrs (b: basic_block) : tac list =
+    let rec take = function
+      | [] -> []
+      | (Goto _ as i) :: _ -> [i]
+      | (Return _ as i) :: _ -> [i]
+      | i :: rest -> i :: take rest
+    in
+    take b.instrs
+  in
+
+  let hoist_func (f: ir_func) : ir_func =
+    let blocks_order : basic_block list = f.entry :: f.blocks in
+    let arr : basic_block array = Array.of_list blocks_order in
+    let nb : int = Array.length arr in
+    let label_to_index : (string, int) Hashtbl.t = Hashtbl.create 16 in
+    Array.iteri (fun i b ->
+      Hashtbl.replace label_to_index b.label i;
+      List.iter (function Label l -> Hashtbl.replace label_to_index l i | _ -> ()) b.instrs)
+      arr;
+
+    let backedges = ref [] in
+    for p = 0 to nb - 1 do
+      match List.rev (reachable_instrs arr.(p)) with
+      | Goto l :: _ ->
+          (match Hashtbl.find_opt label_to_index l with
+           | Some h when h < p -> backedges := (h, p) :: !backedges
+           | _ -> ())
+      | _ -> ()
+    done;
+    let sorted_backedges =
+      List.sort (fun (h1, _) (h2, _) -> compare h2 h1) !backedges
+    in
+
+    let hoist_one (blocks: basic_block list) (h: int) (p: int) : basic_block list =
+      let arr : basic_block array = Array.of_list blocks in
+      let nb : int = Array.length arr in
+      let in_loop i = i >= h && i <= p in
+      let key (i : int) (j : int) = i * 100000 + j in
+
+      let flat = ref [] in
+      for i = 0 to nb - 1 do
+        if in_loop i then
+          List.iteri (fun j inst -> flat := (i, j, inst) :: !flat) arr.(i).instrs
+      done;
+      let flat = List.rev !flat in
+      if flat = [] then blocks
+      else begin
+        let marks : (int, unit) Hashtbl.t = Hashtbl.create 16 in
+        let marked k = Hashtbl.mem marks k in
+
+        let def_count_in_loop x =
+          List.fold_left
+            (fun acc (_, _, inst) ->
+              match def_of_inst inst with
+              | Some y when same_operand x y -> acc + 1
+              | _ -> acc)
+            0 flat
+        in
+
+        let uses_before pos x =
+          List.exists
+            (fun (idx, (_, _, inst)) ->
+              idx < pos &&
+              List.exists (same_operand x) (uses_of_inst inst))
+            (List.mapi (fun idx item -> (idx, item)) flat)
+        in
+
+        let outside_use x =
+          let rec scan i =
+            if i >= nb then false
+            else if not (in_loop i) then
+              List.exists
+                (fun inst -> List.exists (same_operand x) (uses_of_inst inst))
+                arr.(i).instrs
+              || scan (i + 1)
+            else scan (i + 1)
+          in
+          scan 0
+        in
+
+        let operand_invariant op =
+          match op with
+          | Const _ -> true
+          | Var _ | Temp _ ->
+              List.for_all
+                (fun (i, j, inst) ->
+                  match def_of_inst inst with
+                  | Some y when same_operand op y -> marked (key i j)
+                  | _ -> true)
+                flat
+        in
+
+        let is_localish = function
+          | Var name -> List.mem name f.params || List.mem name f.locals
+          | Temp _ -> true
+          | Const _ -> false
+        in
+        let safe_candidate pos x =
+          is_localish x &&
+          def_count_in_loop x = 1 &&
+          not (uses_before pos x) &&
+          not (outside_use x)
+        in
+
+        let safe_binop = function
+          | Ast.Div | Ast.Mod -> false
+          | _ -> true
+        in
+        let body_head = h + 1 in
+        let candidates =
+          List.filter
+            (fun (_, (i, _, _)) -> i = body_head || i = p)
+            (List.mapi (fun idx (i, j, inst) -> (idx, (i, j, inst))) flat)
+        in
+
+        let changed = ref true in
+        while !changed do
+          changed := false;
+          List.iter
+            (fun (pos, (i, j, inst)) ->
+              if not (marked (key i j)) then begin
+                let ok =
+                  match inst with
+                  | Assign (x, y) ->
+                      operand_invariant y && safe_candidate pos x
+                  | AssignBinOp (x, op, y, z) ->
+                      safe_binop op &&
+                      operand_invariant y && operand_invariant z &&
+                      safe_candidate pos x
+                  | AssignUnOp (x, _, y) ->
+                      operand_invariant y && safe_candidate pos x
+                  | _ -> false
+                in
+                if ok then begin
+                  Hashtbl.replace marks (key i j) ();
+                  changed := true
+                end
+              end)
+            candidates
+        done;
+
+        let to_move =
+          List.filter (fun (i, j, _) -> marked (key i j)) flat
+        in
+        if to_move = [] || h <= 0 then blocks
+        else
+          let prev = arr.(h - 1) in
+          let falls_through =
+            match List.rev (reachable_instrs prev) with
+            | (Goto _ | Return _ | IfGoto _ | IfNotGoto _) :: _ -> false
+            | _ -> true
+          in
+          if not falls_through then blocks
+          else begin
+            let moved_instrs = List.map (fun (_, _, inst) -> inst) to_move in
+            let moved_set : (int, unit) Hashtbl.t = Hashtbl.create 16 in
+            List.iter (fun (i, j, _) -> Hashtbl.replace moved_set (key i j) ()) to_move;
+            Array.to_list
+              (Array.mapi
+                 (fun i b ->
+                   if i = h - 1 then
+                     { b with instrs = b.instrs @ moved_instrs }
+                   else begin
+                     let kept = ref [] in
+                     List.iteri
+                       (fun j inst ->
+                         if not (Hashtbl.mem moved_set (key i j)) then
+                           kept := inst :: !kept)
+                       b.instrs;
+                     { b with instrs = List.rev !kept }
+                   end)
+                 arr)
+          end
+      end
+    in
+
+    let rec apply_all blocks = function
+      | [] -> blocks
+      | (h, p) :: rest -> apply_all (hoist_one blocks h p) rest
+    in
+
+    let blocks = apply_all blocks_order sorted_backedges in
+    match blocks with
+    | entry :: rest -> { f with entry = entry; blocks = rest }
+    | [] -> f
+  in
+
+  List.map (function
+    | Function f -> Function (hoist_func f)
+    | GlobalVar _ as g -> g)
+    prog
 
 module ExprMap = Map.Make(struct
   type t = string

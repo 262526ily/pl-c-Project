@@ -27,7 +27,14 @@ let () =
           if enable_opt then
             ir
             |> Lib.Ir.arithmetic_optimize
+            |> Lib.Ir.propagate_entry_constants
+            |> Lib.Ir.arithmetic_optimize
+            |> Lib.Ir.fold_pure_calls
             |> Lib.Ir.common_subexpression_elimination
+            |> Lib.Ir.copy_propagation
+            |> Lib.Ir.dead_code_elimination
+            |> Lib.Ir.loop_invariant_hoist
+            |> Lib.Ir.arithmetic_optimize
             |> Lib.Ir.copy_propagation
             |> Lib.Ir.dead_code_elimination
             |> Lib.Ir.tail_recursion_optimize
