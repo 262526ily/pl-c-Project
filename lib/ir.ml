@@ -914,7 +914,7 @@ let propagate_entry_constants (prog: ir_program) : ir_program =
       | None -> ()
       | Some x ->
           let key = key_of_op x in
-          let n = (match (try Some (StringMap.find key counts) with Not_found -> None) with Some n -> n | None -> 0) in
+          let n = (match StringMap.find_opt key !counts with Some n -> n | None -> 0) in
           counts := StringMap.add key (n + 1) !counts)
       instrs
   in
