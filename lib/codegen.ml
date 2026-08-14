@@ -366,23 +366,57 @@ let emit_function (f: ir_func) =
   let slots, map = compute_offsets f in
 
   let reg_pool = ["s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8"; "s9"; "s10"; "s11"] in
+
+  (* 按静态使用频率分配被调用者保存寄存器，优先缓存最常用的局部变量/临时值 *)
+  let use_count = Hashtbl.create 64 in
+  let bump op =
+    let n = (match Hashtbl.find_opt use_count op with Some n -> n | None -> 0) in
+    Hashtbl.replace use_count op (n + 1)
+  in
+  let bump_instr = function
+    | Assign (x, y) -> bump x; bump y
+    | AssignBinOp (x, _, y, z) -> bump x; bump y; bump z
+    | AssignUnOp (x, _, y) -> bump x; bump y
+    | IfGoto (x, _) | IfNotGoto (x, _) -> bump x
+    | Param x -> bump x
+    | Call (x, _, _) -> bump x
+    | Return (Some x) -> bump x
+    | Goto _ | Label _ | Return None -> ()
+  in
+  let bump_block (b: basic_block) = List.iter bump_instr b.instrs in
+  bump_block f.entry;
+  List.iter bump_block f.blocks;
+
+  let rec range a b =
+    if a > b then [] else a :: range (a + 1) b
+  in
+  let candidates =
+    List.map (fun name -> Var name) f.params
+    @ List.map (fun name -> Var name) f.locals
+    @ List.map (fun t -> Temp t) (range 0 (f.temps - 1))
+  in
+  let compare_candidates a b =
+    let ca = (match Hashtbl.find_opt use_count a with Some n -> n | None -> 0) in
+    let cb = (match Hashtbl.find_opt use_count b with Some n -> n | None -> 0) in
+    if ca <> cb then compare cb ca else compare a b
+  in
+  let sorted_candidates = List.sort compare_candidates candidates in
+
   let reg_map = Hashtbl.create 32 in
   let used_regs = ref [] in
-  let assign op =
-    if not (Hashtbl.mem reg_map op) then
-      match List.find_opt (fun r -> not (List.mem r !used_regs)) reg_pool with
-      | Some r ->
-          Hashtbl.add reg_map op r;
-          used_regs := r :: !used_regs
-      | None -> ()
+  let rec assign_pool regs = function
+    | [] -> ()
+    | _ when regs = [] -> ()
+    | op :: rest ->
+        (match regs with
+         | r :: rs ->
+             Hashtbl.replace reg_map op r;
+             used_regs := r :: !used_regs;
+             assign_pool rs rest
+         | [] -> ())
   in
-  List.iter (fun name -> assign (Var name)) f.params;
-  List.iter (fun name -> assign (Var name)) (List.rev f.locals);
-  for t = 0 to f.temps - 1 do
-    assign (Temp t)
-  done;
-  let used_regs_list = List.rev !used_regs in
-  let saved_count = List.length used_regs_list in
+  assign_pool reg_pool sorted_candidates;
+  let used_regs_list = List.rev !used_regs in  let saved_count = List.length used_regs_list in
   let framesize = ((8 + slots * 4 + saved_count * 4 + 15) / 16) * 16 in
 
   Printf.printf "    .globl %s\n" f.fname;

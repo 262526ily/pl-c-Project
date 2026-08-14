@@ -696,24 +696,25 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
   
   
   (* 获取操作数的常量值 *)
+  (* 获取操作数的常量值：优先使用当前基本块内已传播的常量 *)
 let get_const_value op =
     match op with
-    | Const n -> Some n
-    | Var name -> 
-        (* 只检查全局常量，不追踪局部变量 *)
-        if StringMap.mem name !const_env then
+    | Var name ->
+        if String.contains name '$' then
+          (try Some (StringMap.find name !local_consts) with Not_found -> None)
+        else if StringMap.mem name !const_env then
           Some (StringMap.find name !const_env)
         else
           None
-    | Temp _ -> 
-        None  (* 临时变量不追踪常量 *)
-    
+    | Temp n ->
+        (try Some (StringMap.find ("t" ^ string_of_int n) !local_consts)
+         with Not_found -> None)
   in
   
   (* 记录常量值 *)
   let set_local_const op value =
     match op with
-    | Var name ->
+    | Var name when String.contains name '$' ->
         local_consts := StringMap.add name value !local_consts
     | Temp n ->
         let key = "t" ^ string_of_int n in
@@ -724,7 +725,7 @@ let get_const_value op =
   (* 清除操作数的常量状态 *)
   let clear_const op =
     match op with
-    | Var name -> clear_local name
+    | Var name when String.contains name '$' -> clear_local name
     | Temp n -> clear_local ("t" ^ string_of_int n)
     | _ -> ()
   in
@@ -818,23 +819,26 @@ let get_const_value op =
   in
   
   (* 优化函数 *)
+  (* 每个基本块单独建立常量环境，避免错误地跨控制流传播常量 *)
+  let fold_block_with_reset (b: basic_block) : basic_block =
+    local_consts := StringMap.empty;
+    fold_block b
+  in
+
+  (* 优化函数 *)
   let fold_func (f: ir_func) : ir_func =
     local_consts := StringMap.empty;
     { f with
-      entry = fold_block f.entry;
-      blocks = List.map fold_block f.blocks
+      entry = fold_block_with_reset f.entry;
+      blocks = List.map fold_block_with_reset f.blocks
     }
   in
-  
+
   (* 应用到整个程序 *)
   List.map (function
     | Function f -> Function (fold_func f)
     | GlobalVar _ as g -> g
   ) prog
-
-
-
-
 (* ============================================================ *)
 (* 优化 Pass：公共子表达式消除 (CSE) *)
 
@@ -913,34 +917,59 @@ let ops_of_expr = function
 (* 基本块内公共子表达式消除 *)
 
 let cse_block (b: basic_block) : basic_block =
-    let expr_map = Hashtbl.create 32 in
-    
-    let rec process instrs acc =
-      match instrs with
-      | [] -> List.rev acc
-      | inst :: rest ->
-          let result =
-            match inst with
-            | AssignBinOp (x, op, y, z) ->
-                let key = Printf.sprintf "%s_%s_%s" 
-                  (match op with Ast.Add -> "+" | Ast.Sub -> "-" | Ast.Mul -> "*" | _ -> "?")
-                  (op_key y) (op_key z) in
-                (match Hashtbl.find_opt expr_map key with
-                 | Some existing_def ->
-                     Some (Assign (x, existing_def))
-                 | None ->
-                     Hashtbl.add expr_map key x;
-                     Some inst)
-            | _ -> Some inst
-          in
-          match result with
-          | Some inst' -> process rest (inst' :: acc)
-          | None -> process rest acc
-    in
-    
-    let new_instrs = process b.instrs [] in
-    { b with instrs = new_instrs }
-
+  (* (key, defined_operand, source_operands) *)
+  let exprs : (string * operand * operand list) list ref = ref [] in
+  let invalidate_def d =
+    exprs :=
+      List.filter
+        (fun (_, existing_def, ops) ->
+          existing_def <> d && not (List.mem d ops))
+        !exprs
+  in
+  let rec process instrs acc =
+    match instrs with
+    | [] -> List.rev acc
+    | inst :: rest ->
+        (match get_defined_operand inst with
+         | Some d -> invalidate_def d
+         | None -> ());
+        let result =
+          match inst with
+          | AssignBinOp (x, op, y, z) when x <> y && x <> z ->
+              let key = key_to_string (BinOpKey (op, op_key y, op_key z)) in
+              (match List.find_opt
+                       (fun (k, _, ops) ->
+                         k = key && ops = [y; z])
+                       !exprs with
+               | Some (_, existing_def, _) ->
+                   Some (Assign (x, existing_def))
+               | None ->
+                   exprs := (key, x, [y; z]) :: !exprs;
+                   Some inst)
+          | AssignUnOp (x, op, y) when x <> y ->
+              let key = key_to_string (UnOpKey (op, op_key y)) in
+              (match List.find_opt
+                       (fun (k, _, ops) ->
+                         k = key && ops = [y])
+                       !exprs with
+               | Some (_, existing_def, _) ->
+                   Some (Assign (x, existing_def))
+               | None ->
+                   exprs := (key, x, [y]) :: !exprs;
+                   Some inst)
+          | Call _ ->
+              (* 函数调用可能修改全局变量，清空块内 CSE 状态，保证正确性 *)
+              exprs := [];
+              Some inst
+          | _ ->
+              Some inst
+        in
+        (match result with
+         | Some inst' -> process rest (inst' :: acc)
+         | None -> process rest acc)
+  in
+  let new_instrs = process b.instrs [] in
+  { b with instrs = new_instrs }
 (* ============================================================ *)
 (* 对整个函数做 CSE（迭代到不动点）*)
 
@@ -1051,5 +1080,134 @@ let tail_recursion_optimize (prog: ir_program) : ir_program =
             new_blocks
         in
         Function { f with entry = { f.entry with instrs = new_entry_instrs }; blocks = new_blocks; temps = new_temps }
+    | GlobalVar _ as g -> g
+  ) prog
+(* ============================================================ *)
+(* 优化 Pass：块内复制传播（控制流边界处安全清空） *)
+
+let copy_propagation (prog: ir_program) : ir_program =
+  let is_copyable_var f name = List.mem name f.params || List.mem name f.locals in
+  let rec resolve map seen op =
+    match op with
+    | Const _ -> op
+    | Var _ | Temp _ ->
+        if List.mem op seen then op
+        else
+          (match Hashtbl.find_opt map op with
+           | Some next -> resolve map (op :: seen) next
+           | None -> op)
+  in
+  let invalidate map op =
+    let keys_to_remove =
+      Hashtbl.fold (fun k v acc -> if v = op then k :: acc else acc) map []
+    in
+    List.iter (fun k -> Hashtbl.remove map k) keys_to_remove;
+    Hashtbl.remove map op
+  in
+  let transform_block f (b: basic_block) : basic_block =
+    let map = Hashtbl.create 16 in
+    let process_inst inst =
+      match inst with
+      | Assign (x, y) ->
+          let y' = resolve map [] y in
+          invalidate map x;
+          (match x with
+           | Var name when is_copyable_var f name && x <> y' ->
+               Hashtbl.replace map x y'
+           | Temp _ when x <> y' ->
+               Hashtbl.replace map x y'
+           | _ -> ());
+          Assign (x, y')
+      | AssignBinOp (x, op, y, z) ->
+          let y' = resolve map [] y in
+          let z' = resolve map [] z in
+          let inst' = AssignBinOp (x, op, y', z') in
+          invalidate map x;
+          inst'
+      | AssignUnOp (x, op, y) ->
+          let y' = resolve map [] y in
+          let inst' = AssignUnOp (x, op, y') in
+          invalidate map x;
+          inst'
+      | IfGoto (x, l) -> IfGoto (resolve map [] x, l)
+      | IfNotGoto (x, l) -> IfNotGoto (resolve map [] x, l)
+      | Param x -> Param (resolve map [] x)
+      | Return (Some x) -> Return (Some (resolve map [] x))
+      | Call (x, _, _) ->
+          invalidate map x;
+          let clobbered_keys =
+            Hashtbl.fold
+              (fun k v acc ->
+                match v with
+                | Var name when not (is_copyable_var f name) -> k :: acc
+                | _ -> acc)
+              map []
+          in
+          List.iter (fun k -> Hashtbl.remove map k) clobbered_keys;
+          inst
+      | _ -> inst
+    in
+    { b with instrs = List.map process_inst b.instrs }
+  in
+  List.map (function
+    | Function f ->
+        Function
+          { f with
+            entry = transform_block f f.entry;
+            blocks = List.map (transform_block f) f.blocks }
+    | GlobalVar _ as g -> g
+  ) prog
+
+(* ============================================================ *)
+(* 优化 Pass：死代码删除（仅删除无副作用且结果未被使用的赋值） *)
+
+let dead_code_elimination (prog: ir_program) : ir_program =
+  let dce_func (f: ir_func) : ir_func =
+    let local_set = Hashtbl.create 32 in
+    List.iter (fun name -> Hashtbl.replace local_set name ()) f.params;
+    List.iter (fun name -> Hashtbl.replace local_set name ()) f.locals;
+    let is_localish = function
+      | Var name -> Hashtbl.mem local_set name
+      | Temp _ -> true
+      | Const _ -> false
+    in
+    let rec iterate f =
+      let used = Hashtbl.create 64 in
+      let mark_use op = Hashtbl.replace used op () in
+      let collect_instr = function
+        | Assign (_, y) -> mark_use y
+        | AssignBinOp (_, _, y, z) -> mark_use y; mark_use z
+        | AssignUnOp (_, _, y) -> mark_use y
+        | IfGoto (x, _) | IfNotGoto (x, _) -> mark_use x
+        | Param x -> mark_use x
+        | Return (Some x) -> mark_use x
+        | Goto _ | Label _ | Call _ | Return None -> ()
+      in
+      let collect_block b = List.iter collect_instr b.instrs in
+      collect_block f.entry;
+      List.iter collect_block f.blocks;
+      let is_dead x =
+        is_localish x && not (Hashtbl.mem used x)
+      in
+      let filter_instr = function
+        | Assign (x, _) when is_dead x -> None
+        | AssignBinOp (x, _, _, _) when is_dead x -> None
+        | AssignUnOp (x, _, _) when is_dead x -> None
+        | inst -> Some inst
+      in
+      let transform_block (b: basic_block) : basic_block =
+        { b with instrs = List.filter_map filter_instr b.instrs }
+      in
+      let next =
+        { f with
+          entry = transform_block f.entry;
+          blocks = List.map transform_block f.blocks }
+      in
+      if next = f then f else iterate next
+    in
+    iterate f
+  in
+  List.map (function
+    | Function f -> Function (dce_func f)
     | GlobalVar _ as g -> g
   ) prog
