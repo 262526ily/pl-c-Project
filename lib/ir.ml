@@ -699,6 +699,7 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
   (* 获取操作数的常量值：优先使用当前基本块内已传播的常量 *)
 let get_const_value op =
     match op with
+    | Const n -> Some n
     | Var name ->
         if String.contains name '$' then
           (try Some (StringMap.find name !local_consts) with Not_found -> None)
@@ -1183,7 +1184,7 @@ let dead_code_elimination (prog: ir_program) : ir_program =
         | Return (Some x) -> mark_use x
         | Goto _ | Label _ | Call _ | Return None -> ()
       in
-      let collect_block b = List.iter collect_instr b.instrs in
+      let collect_block (b: basic_block) = List.iter collect_instr b.instrs in
       collect_block f.entry;
       List.iter collect_block f.blocks;
       let is_dead x =
