@@ -494,7 +494,7 @@ let emit_function (f: ir_func) =
       [] instrs
   in
   let back_edges = ref [] in
-  Array.iteri (fun i b ->
+  Array.iteri (fun i (b: basic_block) ->
     List.iter (fun l ->
       match Hashtbl.find_opt label_to_index l with
       | Some j when j <= i -> back_edges := (j, i) :: !back_edges
@@ -535,7 +535,7 @@ let emit_function (f: ir_func) =
     | Return (Some x) -> bump x weight
     | Goto _ | Label _ | Return None -> ()
   in
-  Array.iteri (fun i b ->
+  Array.iteri (fun i (b: basic_block) ->
     let weight = weight_for_depth depths.(i) in
     List.iter (bump_instr weight) b.instrs)
     blocks_array;
