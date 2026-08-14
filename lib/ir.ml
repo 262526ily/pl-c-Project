@@ -1042,11 +1042,11 @@ let tail_recursion_optimize (prog: ir_program) : ir_program =
     | Function f ->
         let new_entry_instrs = tail_recursion f f.entry.instrs in
         let new_blocks =
-          List.map (fun b -> { b with instrs = tail_recursion f b.instrs }) f.blocks
+          List.map (fun (b: basic_block) -> { b with instrs = tail_recursion f b.instrs }) f.blocks
         in
         let new_temps =
           List.fold_left
-            (fun n b -> max n (max_temp_for f b.instrs))
+            (fun n (b: basic_block) -> max n (max_temp_for f b.instrs))
             (max_temp_for f new_entry_instrs)
             new_blocks
         in
