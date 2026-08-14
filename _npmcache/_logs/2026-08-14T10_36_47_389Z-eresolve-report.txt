@@ -1,0 +1,24 @@
+'Log files:
+C:\Users\0\Desktop\pl-c-Project\_npmcache\_logs\2026-08-14T10_36_47_389Z-debug-0.log
+
+# npm resolution error report
+
+While resolving: tree-sitter-ocaml@0.24.2
+Found: tree-sitter@0.21.1
+node_modules/tree-sitter
+  tree-sitter@"0.21.1" from the root project
+
+Could not resolve dependency:
+peerOptional tree-sitter@"^0.22.4" from tree-sitter-ocaml@0.24.2
+node_modules/tree-sitter-ocaml
+  tree-sitter-ocaml@"0.24.2" from the root project
+
+Conflicting peer dependency: tree-sitter@0.22.4
+node_modules/tree-sitter
+  peerOptional tree-sitter@"^0.22.4" from tree-sitter-ocaml@0.24.2
+  node_modules/tree-sitter-ocaml
+    tree-sitter-ocaml@"0.24.2" from the root project
+
+Fix the upstream dependency conflict, or retry
+this command with --force or --legacy-peer-deps
+to accept an incorrect (and potentially broken) dependency resolution.

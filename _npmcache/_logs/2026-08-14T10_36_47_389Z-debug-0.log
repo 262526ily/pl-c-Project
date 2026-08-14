@@ -1,0 +1,99 @@
+0 verbose cli C:\Program Files\nodejs\node.exe C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@10.9.2
+2 info using node@v22.16.0
+3 silly config load:file:C:\Program Files\nodejs\node_modules\npm\npmrc
+4 silly config load:file:C:\Users\0\Desktop\pl-c-Project\_syntaxcheck\.npmrc
+5 silly config load:file:C:\Users\0\.npmrc
+6 silly config load:file:C:\Users\0\Desktop\pl-c-Project\_syntaxcheck\etc\npmrc
+7 verbose title npm install tree-sitter@0.21.1 tree-sitter-ocaml@0.24.2
+8 verbose argv "install" "--prefix" "_syntaxcheck" "tree-sitter@0.21.1" "tree-sitter-ocaml@0.24.2" "--no-audit" "--no-fund" "--cache" ".\\_npmcache"
+9 verbose logfile logs-max:10 dir:C:\Users\0\Desktop\pl-c-Project\_npmcache\_logs\2026-08-14T10_36_47_389Z-
+10 verbose logfile C:\Users\0\Desktop\pl-c-Project\_npmcache\_logs\2026-08-14T10_36_47_389Z-debug-0.log
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:4345298944 maxSize:1086324736 maxEntrySize:543162368
+13 silly idealTree buildDeps
+14 silly fetch manifest tree-sitter@0.21.1
+15 silly packumentCache full:https://registry.npmmirror.com/tree-sitter cache-miss
+16 http fetch GET 200 https://registry.npmmirror.com/npm 114ms
+17 http fetch GET 200 https://registry.npmmirror.com/tree-sitter 86ms (cache miss)
+18 silly packumentCache full:https://registry.npmmirror.com/tree-sitter set size:57846 disposed:false
+19 silly fetch manifest tree-sitter-ocaml@0.24.2
+20 silly packumentCache full:https://registry.npmmirror.com/tree-sitter-ocaml cache-miss
+21 http fetch GET 200 https://registry.npmmirror.com/tree-sitter-ocaml 23ms (cache miss)
+22 silly packumentCache full:https://registry.npmmirror.com/tree-sitter-ocaml set size:15135 disposed:false
+23 silly fetch manifest tree-sitter@^0.22.4
+24 silly packumentCache full:https://registry.npmmirror.com/tree-sitter cache-hit
+25 silly placeDep ROOT tree-sitter@0.21.1 OK for:  want: 0.21.1
+26 silly placeDep ROOT tree-sitter-ocaml@0.24.2 OK for:  want: 0.24.2
+27 silly fetch manifest node-addon-api@^8.0.0
+28 silly packumentCache full:https://registry.npmmirror.com/node-addon-api cache-miss
+29 silly fetch manifest node-gyp-build@^4.8.0
+30 silly packumentCache full:https://registry.npmmirror.com/node-gyp-build cache-miss
+31 silly fetch manifest node-addon-api@^8.3.0
+32 silly packumentCache full:https://registry.npmmirror.com/node-addon-api cache-miss
+33 silly fetch manifest node-gyp-build@^4.8.4
+34 silly packumentCache full:https://registry.npmmirror.com/node-gyp-build cache-miss
+35 http fetch GET 200 https://registry.npmmirror.com/node-addon-api 21ms (cache miss)
+36 silly packumentCache full:https://registry.npmmirror.com/node-addon-api set size:45426 disposed:false
+37 http fetch GET 200 https://registry.npmmirror.com/node-gyp-build 45ms (cache miss)
+38 silly packumentCache full:https://registry.npmmirror.com/node-gyp-build set size:16083 disposed:false
+39 http fetch GET 200 https://registry.npmmirror.com/node-gyp-build 56ms (cache miss)
+40 silly packumentCache full:https://registry.npmmirror.com/node-gyp-build set size:16083 disposed:false
+41 silly packumentCache full:https://registry.npmmirror.com/node-gyp-build dispose
+42 http fetch GET 200 https://registry.npmmirror.com/node-addon-api 60ms (cache miss)
+43 silly packumentCache full:https://registry.npmmirror.com/node-addon-api set size:45426 disposed:false
+44 silly packumentCache full:https://registry.npmmirror.com/node-addon-api dispose
+45 silly placeDep ROOT node-addon-api@8.9.2 OK for: tree-sitter@0.21.1 want: ^8.0.0
+46 silly placeDep ROOT node-gyp-build@4.8.4 OK for: tree-sitter@0.21.1 want: ^4.8.0
+47 verbose stack Error: could not resolve
+47 verbose stack     at PlaceDep.failPeerConflict (C:\Program Files\nodejs\node_modules\npm\node_modules\@npmcli\arborist\lib\place-dep.js:503:25)
+47 verbose stack     at new PlaceDep (C:\Program Files\nodejs\node_modules\npm\node_modules\@npmcli\arborist\lib\place-dep.js:157:21)
+47 verbose stack     at #buildDepStep (C:\Program Files\nodejs\node_modules\npm\node_modules\@npmcli\arborist\lib\arborist\build-ideal-tree.js:920:18)
+47 verbose stack     at async Arborist.buildIdealTree (C:\Program Files\nodejs\node_modules\npm\node_modules\@npmcli\arborist\lib\arborist\build-ideal-tree.js:181:7)
+47 verbose stack     at async Promise.all (index 1)
+47 verbose stack     at async Arborist.reify (C:\Program Files\nodejs\node_modules\npm\node_modules\@npmcli\arborist\lib\arborist\reify.js:131:5)
+47 verbose stack     at async Install.exec (C:\Program Files\nodejs\node_modules\npm\lib\commands\install.js:150:5)
+47 verbose stack     at async Npm.exec (C:\Program Files\nodejs\node_modules\npm\lib\npm.js:207:9)
+47 verbose stack     at async module.exports (C:\Program Files\nodejs\node_modules\npm\lib\cli\entry.js:74:5)
+48 error code ERESOLVE
+49 error ERESOLVE could not resolve
+50 error
+51 error While resolving: tree-sitter-ocaml@0.24.2
+51 error Found: tree-sitter@0.21.1
+51 error node_modules/tree-sitter
+51 error   tree-sitter@"0.21.1" from the root project
+51 error
+51 error Could not resolve dependency:
+51 error peerOptional tree-sitter@"^0.22.4" from tree-sitter-ocaml@0.24.2
+51 error node_modules/tree-sitter-ocaml
+51 error   tree-sitter-ocaml@"0.24.2" from the root project
+51 error
+51 error Conflicting peer dependency: tree-sitter@0.22.4
+51 error node_modules/tree-sitter
+51 error   peerOptional tree-sitter@"^0.22.4" from tree-sitter-ocaml@0.24.2
+51 error   node_modules/tree-sitter-ocaml
+51 error     tree-sitter-ocaml@"0.24.2" from the root project
+51 error
+51 error Fix the upstream dependency conflict, or retry
+51 error this command with --force or --legacy-peer-deps
+51 error to accept an incorrect (and potentially broken) dependency resolution.
+52 error
+52 error
+52 error For a full report see:
+52 error C:\Users\0\Desktop\pl-c-Project\_npmcache\_logs\2026-08-14T10_36_47_389Z-eresolve-report.txt
+53 silly unfinished npm timer reify 1786703808148
+54 silly unfinished npm timer reify:loadTrees 1786703808163
+55 silly unfinished npm timer idealTree:buildDeps 1786703808198
+56 silly unfinished npm timer idealTree:node_modules/tree-sitter-ocaml 1786703808385
+57 verbose cwd C:\Users\0\Desktop\pl-c-Project
+58 verbose os Windows_NT 10.0.26200
+59 verbose node v22.16.0
+60 verbose npm  v10.9.2
+61 notice
+61 notice New major version of npm available! 10.9.2 -> 12.0.2
+61 notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2
+61 notice To update run: npm install -g npm@12.0.2
+61 notice  { force: true, [Symbol(proc-log.meta)]: true }
+62 verbose exit 1
+63 verbose code 1
+64 error A complete log of this run can be found in: C:\Users\0\Desktop\pl-c-Project\_npmcache\_logs\2026-08-14T10_36_47_389Z-debug-0.log

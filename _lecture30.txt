@@ -1,0 +1,820 @@
+
+--- PAGE 1 ---
+Programming Languages and Compilers
+Lecture 30. Register Allocation
+袁梦霆 (YUAN Mengting)
+ymt@whu.edu.cn
+School of Computer Science, Wuhan University
+
+--- PAGE 2 ---
+Register Allocation
+• What have we learned so far?
+• The source program is translated into machine IR.
+• A sequential intermediate representation.
+• Types and operations are aligned to the target machine.
+• The only problem is that machine IR uses virtual registers.
+
+--- PAGE 3 ---
+Register Allocation
+• Problem statement
+• Given an intermediate representation that uses a set of
+virtual registers, find a map from virtual registers to
+physical registers.
+• Spilling
+• As the number of virtual registers is not limited, it may fail
+to map all virtual registers to physical registers.
+• Some virtual registers have to be “spilled” to the stack.
+• Requirements
+• Produce correct codes when the virtual registers are
+replaced with physical registers.
+• Minimize the overhead of introduced loads and stores.
+• Minimize the number of spilled registers.
+
+--- PAGE 4 ---
+Register Allocation via Graph Coloring
+• Graph coloring
+• Assign labels (colors) to vertices such that no two adjacent vertices have the same
+color.
+
+--- PAGE 5 ---
+Register Allocation via Graph Coloring
+• Idea
+• Many allocation problems are hard to solve.
+• Register allocation is NP‐complete.
+• We convert register allocation problems into graph coloring problems.
+• Vertices are used to represent virtual registers.
+• Each color is considered as a physical registers.
+• Two adjacent vertices do not share the same color (physical register).
+• Issue
+• Graph coloring is also NP‐complete.
+• A heuristic algorithm is proposed to solve graph coloring problems.
+• Chaitin’s algorithm.
+
+--- PAGE 6 ---
+Register Allocation via Graph Coloring
+• Sketch of algorithm
+• Perform liveness analysis.
+• Construct interference graph 𝐺 using the result of liveness analysis.
+• Assign 𝑘 colors to 𝑛 vertices of the graph.
+• Heuristic:
+• 𝐺 is 𝑘‐colorable iff 𝐺 – {𝑣} is 𝑘‐colorable, where 𝑣 is a vertex with 𝑘 – 1 edges.
+• Select a vertex 𝑣 with fewer then 𝑘 edges.
+• Recursively color 𝐺 (cid:3398) (cid:4668)𝑣(cid:4669).
+• Assign a valid color to 𝑣 in 𝐺.
+
+--- PAGE 7 ---
+Register Allocation via Graph Coloring
+• Example
+• Liveness analysis
+%1 = %2 + %3
+%4 = %5 + %6
+%4 = %4 + %5
+%2 = %1 + %4 %2 = %1 - %4
+%7 = %2
+{ }
+
+--- PAGE 8 ---
+Register Allocation via Graph Coloring
+• Example
+• Liveness analysis
+%1 = %2 + %3
+%4 = %5 + %6
+%4 = %4 + %5
+%2 = %1 + %4 %2 = %1 - %4
+{%2}
+%7 = %2
+{ }
+
+--- PAGE 9 ---
+Register Allocation via Graph Coloring
+• Example
+• Liveness analysis
+%1 = %2 + %3
+%4 = %5 + %6
+%4 = %4 + %5
+%2 = %1 + %4 %2 = %1 - %4
+{%2} {%2}
+{%2}
+%7 = %2
+{ }
+
+--- PAGE 10 ---
+Register Allocation via Graph Coloring
+• Example
+• Liveness analysis
+%1 = %2 + %3
+%4 = %5 + %6
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%2 = %1 + %4 %2 = %1 - %4
+{%2} {%2}
+{%2}
+%7 = %2
+{ }
+
+--- PAGE 11 ---
+Register Allocation via Graph Coloring
+• Example
+• Liveness analysis
+%1 = %2 + %3
+%4 = %5 + %6
+{%1, %4, %5}
+{%1, %4, %5}
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%2 = %1 + %4 %2 = %1 - %4
+{%2} {%2}
+{%2}
+%7 = %2
+{ }
+
+--- PAGE 12 ---
+Register Allocation via Graph Coloring
+• Example
+• Liveness analysis
+%1 = %2 + %3
+{%1, %5, %6}
+{%1, %5, %6}
+%4 = %5 + %6
+{%1, %4, %5}
+{%1, %4, %5}
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%2 = %1 + %4 %2 = %1 - %4
+{%2} {%2}
+{%2}
+%7 = %2
+{ }
+
+--- PAGE 13 ---
+Register Allocation via Graph Coloring
+• Example
+{%2, %3, %5, %6}
+• Liveness analysis
+%1 = %2 + %3
+{%1, %5, %6}
+{%1, %5, %6}
+%4 = %5 + %6
+{%1, %4, %5}
+{%1, %4, %5}
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%2 = %1 + %4 %2 = %1 - %4
+{%2} {%2}
+{%2}
+%7 = %2
+{ }
+
+--- PAGE 14 ---
+Register Allocation via Graph Coloring
+• Example
+• Construct interference graph.
+{%2, %3, %5, %6}
+%1 %2
+%1 = %2 + %3
+{%1, %5, %6}
+{%1, %5, %6}
+%4 = %5 + %6
+{%1, %4, %5}
+{%1, %4, %5} %7 %3
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%2 = %1 + %4 %2 = %1 - %4 %6 %4
+{%2} {%2}
+{%2}
+%5
+%7 = %2
+{ }
+
+--- PAGE 15 ---
+Register Allocation via Graph Coloring
+• Example
+• Construct interference graph.
+{%2, %3, %5, %6}
+%1 %2
+%1 = %2 + %3
+{%1, %5, %6}
+{%1, %5, %6}
+%4 = %5 + %6
+{%1, %4, %5}
+{%1, %4, %5} %7 %3
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%2 = %1 + %4 %2 = %1 - %4 %6 %4
+{%2} {%2}
+{%2}
+%5
+%7 = %2
+{ }
+
+--- PAGE 16 ---
+Register Allocation via Graph Coloring
+• Example
+• Construct interference graph.
+{%2, %3, %5, %6}
+%1 %2
+%1 = %2 + %3
+{%1, %5, %6}
+{%1, %5, %6}
+%4 = %5 + %6
+{%1, %4, %5}
+{%1, %4, %5} %7 %3
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%2 = %1 + %4 %2 = %1 - %4 %6 %4
+{%2} {%2}
+{%2}
+%5
+%7 = %2
+{ }
+
+--- PAGE 17 ---
+Register Allocation via Graph Coloring
+• Example
+• Construct interference graph.
+{%2, %3, %5, %6}
+%1 %2
+%1 = %2 + %3
+{%1, %5, %6}
+{%1, %5, %6}
+%4 = %5 + %6
+{%1, %4, %5}
+{%1, %4, %5} %7 %3
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%2 = %1 + %4 %2 = %1 - %4 %6 %4
+{%2} {%2}
+{%2}
+%5
+%7 = %2
+{ }
+
+--- PAGE 18 ---
+Register Allocation via Graph Coloring
+• Example
+• Construct interference graph.
+{%2, %3, %5, %6}
+%1 %2
+%1 = %2 + %3
+{%1, %5, %6}
+{%1, %5, %6}
+%4 = %5 + %6
+{%1, %4, %5}
+{%1, %4, %5} %7 %3
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%2 = %1 + %4 %2 = %1 - %4 %6 %4
+{%2} {%2}
+{%2}
+%5
+%7 = %2
+{ }
+
+--- PAGE 19 ---
+Register Allocation via Graph Coloring
+• Example
+• Remove vertices. Removed vertices
+%1 %2
+%7 %3
+%6 %4
+%5
+
+--- PAGE 20 ---
+Register Allocation via Graph Coloring
+• Example
+• Remove vertices. Removed vertices
+%5
+%1 %2
+%7 %3
+%6 %4
+
+--- PAGE 21 ---
+Register Allocation via Graph Coloring
+• Example
+• Remove vertices. Removed vertices
+%5
+%1 %2
+%6
+%7 %3
+%4
+
+--- PAGE 22 ---
+Register Allocation via Graph Coloring
+• Example
+• Remove vertices. Removed vertices
+%5
+%1 %2
+%6
+%4
+%7 %3
+
+--- PAGE 23 ---
+Register Allocation via Graph Coloring
+• Example
+• Remove vertices. Removed vertices
+%5
+%1 %2
+%6
+%4
+%7
+%3
+
+--- PAGE 24 ---
+Register Allocation via Graph Coloring
+• Example
+• Remove vertices. Removed vertices
+%5
+%6
+%4
+%3
+%2
+%1
+%7
+
+--- PAGE 25 ---
+Register Allocation via Graph Coloring
+• Example
+• Start allocation via restoring vertices. Removed vertices
+• 6 registers.
+%5
+%6
+%4
+%3
+%2
+%1
+%7
+
+--- PAGE 26 ---
+Register Allocation via Graph Coloring
+• Example
+• Start allocation via restoring vertices. Removed vertices
+• 6 registers.
+%5
+%1 %2
+%6
+%4
+%7
+%3
+
+--- PAGE 27 ---
+Register Allocation via Graph Coloring
+• Example
+• Start allocation via restoring vertices. Removed vertices
+• 6 registers.
+%5
+%1 %2
+%6
+%4
+%7 %3
+
+--- PAGE 28 ---
+Register Allocation via Graph Coloring
+• Example
+• Start allocation via restoring vertices. Removed vertices
+• 6 registers.
+%5
+%1 %2
+%6
+%7 %3
+%4
+
+--- PAGE 29 ---
+Register Allocation via Graph Coloring
+• Example
+• Start allocation via restoring vertices. Removed vertices
+• 6 registers.
+%5
+%1 %2
+%7 %3
+%6 %4
+
+--- PAGE 30 ---
+Register Allocation via Graph Coloring
+• Example
+• Start allocation via restoring vertices. Removed vertices
+• 6 registers.
+%1 %2
+%7 %3
+%6 %4
+%5
+
+--- PAGE 31 ---
+Register Allocation via Graph Coloring
+• Example
+• Rewrite the program.
+t1 t2 t3 t4
+t1 = t1 + t2
+%1 %2
+t2 = t4 + t3
+%7 %3
+t2 = t2 + t4
+t1 = t1 + t2 t1 = t1 – t2
+%6 %4
+%5 t1 = t1
+
+--- PAGE 32 ---
+Register Allocation via Graph Coloring
+• Example
+• 4 colors (physical registers) are allocated.
+• Note that %5 has 5 edges.
+• The graph is still 4‐colorable. %1 %2
+%7 %3
+%6 %4
+%5
+
+--- PAGE 33 ---
+Register Allocation via Graph Coloring
+• Spill
+• If we have only 3 physical registers, it is
+impossible to assign a color to %5.
+• In this case, %5 is spilled to a stack %1 %2
+location.
+• We rewrite the program by adding loads
+and stores for %5.
+• Try to color the new program. %7 %3
+%6 %4
+%5
+
+--- PAGE 34 ---
+Register Allocation via Graph Coloring
+{%2, %3, %6}
+• Spill
+%1 = %2 + %3
+• If we have only 3 physical registers, it is
+{%1, %6}
+impossible to assign a color to %5. {%1, %6}
+%5 = load (sp+10)
+• In this case, %5 is spilled to a stack
+{%1, %5, %6}
+location.
+{%1, %5, %6}
+• We rewrite the program by adding loads %4 = %5 + %6
+and stores for %5.
+{%1, %4, %5}
+• Try to color the new program.
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%2 = %1 + %4 %2 = %1 - %4
+{%2} {%2}
+{%2}
+%7 = %2
+{ }
+
+--- PAGE 35 ---
+Register Allocation via Graph Coloring
+• Spill {%2, %3, %6}
+%1 = %2 + %3
+{%1, %6}
+{%1, %6}
+%1 %2
+%5 = load (sp+10)
+{%1, %5, %6}
+{%1, %5, %6}
+%4 = %5 + %6
+{%1, %4, %5} %7 %3
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%2 = %1 + %4 %2 = %1 - %4 %6 %4
+{%2} {%2}
+{%2}
+%5
+%7 = %2
+{ }
+
+--- PAGE 36 ---
+Register Allocation via Graph Coloring
+• Spill
+Removing order
+%6
+%1 %2
+%5
+%4
+%7 %3
+%3
+%2
+%6 %4
+%1
+%5
+%7
+
+--- PAGE 37 ---
+Register Allocation via Graph Coloring
+• Spill
+Removing order
+%6
+%1 %2
+%5
+%4
+%7
+%3
+
+--- PAGE 38 ---
+Register Allocation via Graph Coloring
+• Spill
+Removing order
+%6
+%1 %2
+%5
+%4
+%7 %3
+%3
+
+--- PAGE 39 ---
+Register Allocation via Graph Coloring
+• Spill
+Removing order
+%6
+%1 %2
+%5
+%7 %3
+%4
+
+--- PAGE 40 ---
+Register Allocation via Graph Coloring
+• Spill
+Removing order
+%6
+%1 %2
+%7 %3
+%4
+%5
+
+--- PAGE 41 ---
+Register Allocation via Graph Coloring
+• Spill
+Removing order
+• Not 3‐colorable.
+%1 %2
+%7 %3
+%6 %4
+%5
+
+--- PAGE 42 ---
+Register Allocation via Graph Coloring
+• Spill
+{%2, %3}
+• Not 3‐colorable.
+%1 = %2 + %3
+• We have to spill %6 and rewrite the {%1}
+{%1}
+program again!
+%5 = load (sp+10)
+%6 = load (sp+14)
+{%1, %5, %6}
+{%1, %5, %6}
+%4 = %5 + %6
+{%1, %4, %5}
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%2 = %1 + %4 %2 = %1 - %4
+{%2} {%2}
+{%2}
+%7 = %2
+{ }
+
+--- PAGE 43 ---
+Register Allocation via Graph Coloring
+• Spill
+{%2, %3}
+• Try graph coloring again. %1 = %2 + %3
+{%1}
+{%1}
+%1 %2
+%5 = load (sp+10)
+%6 = load (sp+14)
+{%1, %5, %6}
+{%1, %5, %6}
+%4 = %5 + %6
+%7 %3
+{%1, %4, %5}
+%4 = %4 + %5
+{%1, %4}
+{%1, %4} {%1, %4}
+%6 %4
+%2 = %1 + %4 %2 = %1 - %4
+{%2} {%2}
+{%2}
+%5
+%7 = %2
+{ }
+
+--- PAGE 44 ---
+Register Allocation via Graph Coloring
+• Spill
+• Try graph coloring again.
+%1 %2
+%7 %3
+%6 %4
+%5
+
+--- PAGE 45 ---
+Register Allocation via Graph Coloring
+• Algorithm
+• 1. Build the interference graph 𝐺 via liveness analysis.
+• 2. Try to color the interference graph.
+• 3. The algorithm terminates if G is k‐colorable.
+• 4. Spill a vertex whose number of edges is larger than 𝑘.
+• The selection of a vertex to spill is also heuristic.
+• 5. Rewrite the program by adding loads and stores.
+• 6. Goto 1.
+
+--- PAGE 46 ---
+Register Allocation via Graph Coloring
+• Other potential improvements
+• Coalescing
+• Some optimizations may increase live ranges that cause register pressure.
+• For example, copy propagation and common subexpression elimination.
+• It can be avoid by merging vertices in the interference graph.
+• Given a statement a = b, we can coalesce a and b in the graph if a and b do not interfere
+each other.
+• When a and b are assigned the same register ti, the original statement can be rewritten as
+ti = ti.
+• This redundant statement will be removed by other optimizations.
+• Risks
+• Coalescing may make a 𝑘‐colorable graph uncolorable.
+
+--- PAGE 47 ---
+Linear Scan
+• Idea
+• A greedy algorithm proposed by Poletto & Sarkar.
+• https://dl.acm.org/doi/abs/10.1145/330249.330250
+• Use live interval to express the liveness of variable.
+• Scan the linear IR from the first statement to the last statement.
+• When a live interval begins at the current scan point, give a free register to the
+variable.
+• When a live interval ends at the current scan point, free the register assigned to
+the variable.
+• However, spilling variables is still inevitable.
+
+--- PAGE 48 ---
+Linear Scan
+• Live intervals
+• The live range of a variable is the set of program locations where the variable is
+live.
+• Given a sequential IR of program, the live interval of a variable is the smallest
+subrange of IR containing all alive ranges.
+• Live intervals are less precise compared to live ranges.
+• It is more suitable for register allocation.
+
+--- PAGE 49 ---
+Linear Scan
+• Live intervals
+%1 %2 %3 %4 %5 %6 %7
+• Example {%2, %3, %5, %6}
+%1 = %2 + %3
+{%1, %5, %6}
+{%1, %5, %6}
+%4 = %5 + %6
+{%1, %4, %5}
+{%1, %4, %5}
+%4 = %4 + %5
+{%1, %4}
+{%1, %4}
+%2 = %1 + %4
+{%2}
+{%1, %4}
+%2 = %1 - %4
+{%2}
+{%2}
+%7 = %2
+{ }
+
+--- PAGE 50 ---
+Linear Scan
+• Allocation via scanning
+%1 %2 %3 %4 %5 %6 %7
+• 4 physical registers
+t1 t2 t3 t4
+
+--- PAGE 51 ---
+Linear Scan
+• Allocation via scanning
+%1 %2 %3 %4 %5 %6 %7
+• 4 physical registers
+t1 t2 t3 t4
+
+--- PAGE 52 ---
+Linear Scan
+• Allocation via scanning
+%1 %2 %3 %4 %5 %6 %7
+• 4 physical registers
+t1 t2 t3 t4
+• Assign t1 to %2.
+
+--- PAGE 53 ---
+Linear Scan
+• Allocation via scanning
+%1 %2 %3 %4 %5 %6 %7
+• 4 physical registers
+t1 t2 t3 t4
+• Assign t1 to %2.
+• t2 → %3.
+• t3 → %5.
+• t4 → %6.
+
+--- PAGE 54 ---
+Linear Scan
+• Allocation via scanning
+%1 %2 %3 %4 %5 %6 %7
+• 4 physical registers
+t1 t2 t3 t4
+• Assign t1 to %2.
+• t2 → %3.
+• t3 → %5.
+• t4 → %6.
+• Free t2.
+
+--- PAGE 55 ---
+Linear Scan
+• Allocation via scanning
+%1 %2 %3 %4 %5 %6 %7
+• 4 physical registers
+t1 t2 t3 t4
+• Assign t1 to %2.
+• t2 → %3.
+• t3 → %5.
+• t4 → %6.
+• Free t2.
+• t2 → %1.
+
+--- PAGE 56 ---
+Linear Scan
+• Allocation via scanning
+%1 %2 %3 %4 %5 %6 %7
+• 4 physical registers
+t1 t2 t3 t4
+• Assign t1 to %2.
+• t2 → %3.
+• t3 → %5.
+• t4 → %6.
+• Free t2.
+• t2 → %1.
+• Free t4.
+• t4 → %4.
+
+--- PAGE 57 ---
+Linear Scan
+• Allocation via scanning
+%1 %2 %3 %4 %5 %6 %7
+• 4 physical registers
+t1 t2 t3 t4
+• Assign t1 to %2.
+• t2 → %3.
+• t3 → %5.
+• t4 → %6.
+• Free t2.
+• t2 → %1.
+• Free t4.
+• t4 → %4.
+• Free t3.
+
+--- PAGE 58 ---
+Linear Scan
+• Allocation via scanning
+%1 %2 %3 %4 %5 %6 %7
+• 4 physical registers
+t1 t2 t3 t4
+• Assign t1 to %2.
+• t2 → %3.
+• t3 → %5.
+• t4 → %6.
+• Free t2.
+• t2 → %1.
+• Free t4.
+• t4 → %4.
+• Free t3.
+• Free t2 and t4.
+
+--- PAGE 59 ---
+Linear Scan
+• Allocation via scanning
+%1 %2 %3 %4 %5 %6 %7
+• 4 physical registers
+t1 t2 t3 t4
+• Assign t1 to %2.
+• t2 → %3.
+• t3 → %5.
+• t4 → %6.
+• Free t2.
+• t2 → %1.
+• Free t4.
+• t4 → %4.
+• Free t3.
+• Free t2 and t4.
+• Free t1.
+
+--- PAGE 60 ---
+Comparison of Performance
+• Graph coloring vs linear scan
