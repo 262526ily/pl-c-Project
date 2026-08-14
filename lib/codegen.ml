@@ -58,52 +58,68 @@ let find_offset map op =
 (* ============================================================ *)
 (* 加载和存储操作数 *)
 
-let load_op reg op map =
+let load_op reg op map reg_map =
   match op with
   | Const n ->
       Printf.printf "    li %s, %d\n" reg n
   | Temp t ->
-      if Hashtbl.mem map (Temp t) then
-        let off = Hashtbl.find map (Temp t) in
-        Printf.printf "    lw %s, %d(fp)\n" reg off
-      else (
-        Printf.eprintf "ERROR: Temp %d not found in offset map\n" t;
-        exit 1
-      )
+      (match Hashtbl.find_opt reg_map (Temp t) with
+       | Some phys ->
+           Printf.printf "    mv %s, %s\n" reg phys
+       | None ->
+           if Hashtbl.mem map (Temp t) then
+             let off = Hashtbl.find map (Temp t) in
+             Printf.printf "    lw %s, %d(fp)\n" reg off
+           else (
+             Printf.eprintf "ERROR: Temp %d not found in offset map\n" t;
+             exit 1
+           ))
   | Var name ->
-      if Hashtbl.mem map (Var name) then
-        let off = Hashtbl.find map (Var name) in
-        Printf.printf "    lw %s, %d(fp)\n" reg off
-      else
-        (Printf.printf "    la %s, %s\n" reg name;
-         Printf.printf "    lw %s, 0(%s)\n" reg reg)
+      (match Hashtbl.find_opt reg_map (Var name) with
+       | Some phys ->
+           Printf.printf "    mv %s, %s\n" reg phys
+       | None ->
+           if Hashtbl.mem map (Var name) then
+             let off = Hashtbl.find map (Var name) in
+             Printf.printf "    lw %s, %d(fp)\n" reg off
+           else
+             (Printf.printf "    la %s, %s\n" reg name;
+              Printf.printf "    lw %s, 0(%s)\n" reg reg))
 
-let store_op reg op map =
+let store_op reg op map reg_map =
   match op with
   | Const _ -> ()
   | Temp t ->
-      if Hashtbl.mem map (Temp t) then
-        let off = Hashtbl.find map (Temp t) in
-        Printf.printf "    sw %s, %d(fp)\n" reg off
-      else (
-        Printf.eprintf "ERROR: Temp %d not found in offset map for store\n" t;
-        exit 1
-      )
+      (match Hashtbl.find_opt reg_map (Temp t) with
+       | Some phys ->
+           Printf.printf "    mv %s, %s\n" phys reg
+       | None ->
+           if Hashtbl.mem map (Temp t) then
+             let off = Hashtbl.find map (Temp t) in
+             Printf.printf "    sw %s, %d(fp)\n" reg off
+           else (
+             Printf.eprintf "ERROR: Temp %d not found in offset map for store\n" t;
+             exit 1
+           ))
   | Var name ->
-      if Hashtbl.mem map (Var name) then
-        let off = Hashtbl.find map (Var name) in
-        Printf.printf "    sw %s, %d(fp)\n" reg off
-      else
-        (Printf.printf "    la t3, %s\n" name;
-         Printf.printf "    sw %s, 0(t3)\n" reg)
+      (match Hashtbl.find_opt reg_map (Var name) with
+       | Some phys ->
+           Printf.printf "    mv %s, %s\n" phys reg
+       | None ->
+           if Hashtbl.mem map (Var name) then
+             let off = Hashtbl.find map (Var name) in
+             Printf.printf "    sw %s, %d(fp)\n" reg off
+           else
+             (Printf.printf "    la t3, %s\n" name;
+              Printf.printf "    sw %s, 0(t3)\n" reg))
 
 (* ============================================================ *)
-(* 计算栈槽偏移量映射表 *)
+(* ?????????? *)
 
 let compute_offsets (f: ir_func) =
   let local_slots = ref 0 in
   let map = Hashtbl.create 32 in
-  
+
   List.iteri (fun i name ->
     if i < 8 then (
       incr local_slots;
@@ -112,32 +128,31 @@ let compute_offsets (f: ir_func) =
       Hashtbl.add map (Var name) ((i - 8) * 4)
     )
   ) f.params;
-  
+
   List.iter (fun name ->
     if not (Hashtbl.mem map (Var name)) then (
       incr local_slots;
       Hashtbl.add map (Var name) (-8 - 4 * !local_slots)
     )
   ) f.locals;
-  
+
   for t = 0 to f.temps - 1 do
     incr local_slots;
     Hashtbl.add map (Temp t) (-8 - 4 * !local_slots)
   done;
-  
+
   (!local_slots, map)
 
 (* ============================================================ *)
-(* 生成乘除法优化的代码 *)
+(* ?????????? *)
 
-(* 生成乘法代码（使用 M 扩展 + 常量优化） *)
-let emit_mul x y z map =
+let emit_mul x y z map reg_map =
   let is_y_const = is_const_op y in
   let is_z_const = is_const_op z in
-  
+
   if is_z_const then
     let n = get_const_val z in
-    load_op "t0" y map;
+    load_op "t0" y map reg_map;
     if n = 0 then
       Printf.printf "    li t0, 0\n"
     else if n = 1 then
@@ -164,11 +179,11 @@ let emit_mul x y z map =
        Printf.printf "    slli t2, t0, 1\n";
        Printf.printf "    add t0, t1, t2\n")
     else
-      (load_op "t1" z map;
+      (load_op "t1" z map reg_map;
        Printf.printf "    mul t0, t0, t1\n")
   else if is_y_const then
     let n = get_const_val y in
-    load_op "t0" z map;
+    load_op "t0" z map reg_map;
     if n = 0 then
       Printf.printf "    li t0, 0\n"
     else if n = 1 then
@@ -179,77 +194,88 @@ let emit_mul x y z map =
       let shift = log2 n in
       Printf.printf "    slli t0, t0, %d\n" shift
     else
-      (load_op "t1" y map;
+      (load_op "t1" y map reg_map;
        Printf.printf "    mul t0, t0, t1\n")
   else
-    (load_op "t0" y map;
-     load_op "t1" z map;
+    (load_op "t0" y map reg_map;
+     load_op "t1" z map reg_map;
      Printf.printf "    mul t0, t0, t1\n");
-  store_op "t0" x map
+  store_op "t0" x map reg_map
 
-(* 生成除法代码（使用 M 扩展 + 常量优化） *)
-let emit_div x y z map =
+let emit_div x y z map reg_map =
   if is_const_op z then
     let n = get_const_val z in
-    load_op "t0" y map;
+    load_op "t0" y map reg_map;
     if n = 1 then
       ()
     else if n = -1 then
       Printf.printf "    neg t0, t0\n"
     else if is_power_of_two n then
       let shift = log2 n in
-      Printf.printf "    srai t0, t0, %d\n" shift
+      if shift >= 31 then
+        (load_op "t1" z map reg_map;
+         Printf.printf "    div t0, t0, t1\n")
+      else (
+        Printf.printf "    srai t1, t0, 31\n";
+        Printf.printf "    srli t1, t1, %d\n" (32 - shift);
+        Printf.printf "    add t0, t0, t1\n";
+        Printf.printf "    srai t0, t0, %d\n" shift
+      )
     else
-      (load_op "t1" z map;
+      (load_op "t1" z map reg_map;
        Printf.printf "    div t0, t0, t1\n")
   else
-    (load_op "t0" y map;
-     load_op "t1" z map;
+    (load_op "t0" y map reg_map;
+     load_op "t1" z map reg_map;
      Printf.printf "    div t0, t0, t1\n");
-  store_op "t0" x map
+  store_op "t0" x map reg_map
 
-(* 生成取模代码（使用 M 扩展 + 常量优化） *)
-let emit_mod x y z map =
+let emit_mod x y z map reg_map =
   if is_const_op z then
     let n = get_const_val z in
-    load_op "t0" y map;
+    load_op "t0" y map reg_map;
     if n = 1 then
       Printf.printf "    li t0, 0\n"
     else if is_power_of_two n then
-      let mask = n - 1 in
-      if is_imm12 mask then
-        (* 小掩码：用 andi（一条指令） *)
-        Printf.printf "    andi t0, t0, %d\n" mask
-      else
-        (* 大掩码：用 li + and（两条指令） *)
-        (Printf.printf "    li t1, %d\n" mask;
-         Printf.printf "    and t0, t0, t1\n")
+      let shift = log2 n in
+      if shift >= 31 then
+        (load_op "t1" z map reg_map;
+         Printf.printf "    rem t0, t0, t1\n")
+      else (
+        let mask = n - 1 in
+        Printf.printf "    srai t1, t0, 31\n";
+        Printf.printf "    srli t1, t1, %d\n" (32 - shift);
+        Printf.printf "    add t0, t0, t1\n";
+        if is_imm12 mask then
+          Printf.printf "    andi t0, t0, %d\n" mask
+        else (
+          Printf.printf "    li t2, %d\n" mask;
+          Printf.printf "    and t0, t0, t2\n");
+        Printf.printf "    sub t0, t0, t1\n"
+      )
     else
-      (load_op "t1" z map;
+      (load_op "t1" z map reg_map;
        Printf.printf "    rem t0, t0, t1\n")
   else
-    (load_op "t0" y map;
-     load_op "t1" z map;
+    (load_op "t0" y map reg_map;
+     load_op "t1" z map reg_map;
      Printf.printf "    rem t0, t0, t1\n");
-  store_op "t0" x map
+  store_op "t0" x map reg_map
 
-(* ============================================================ *)
-(* 翻译单条 TAC 指令 *)
-
-let emit_tac fname tac_inst map current_args =
+let emit_tac fname tac_inst map reg_map current_args =
   match tac_inst with
   | Assign (x, y) ->
-      load_op "t0" y map;
-      store_op "t0" x map
+      load_op "t0" y map reg_map;
+      store_op "t0" x map reg_map
 
   | AssignBinOp (x, op, y, z) ->
       (match op with
-       | Ast.Mul -> emit_mul x y z map
-       | Ast.Div -> emit_div x y z map
-       | Ast.Mod -> emit_mod x y z map
+       | Ast.Mul -> emit_mul x y z map reg_map
+       | Ast.Div -> emit_div x y z map reg_map
+       | Ast.Mod -> emit_mod x y z map reg_map
        | _ ->
-           load_op "t0" y map;
-           load_op "t1" z map;
+           load_op "t0" y map reg_map;
+           load_op "t1" z map reg_map;
            (match op with
             | Ast.Add -> Printf.printf "    add t0, t0, t1\n"
             | Ast.Sub -> Printf.printf "    sub t0, t0, t1\n"
@@ -263,25 +289,25 @@ let emit_tac fname tac_inst map current_args =
             | Ast.Or  -> Printf.printf "    or t0, t0, t1\n"
             | Ast.Mul | Ast.Div | Ast.Mod -> assert false
            );
-           store_op "t0" x map)
+           store_op "t0" x map reg_map)
 
   | AssignUnOp (x, op, y) ->
-      load_op "t0" y map;
+      load_op "t0" y map reg_map;
       (match op with
        | Ast.Pos -> ()
        | Ast.Neg -> Printf.printf "    neg t0, t0\n"
        | Ast.Not -> Printf.printf "    seqz t0, t0\n");
-      store_op "t0" x map
+      store_op "t0" x map reg_map
 
   | Goto l ->
       Printf.printf "    j %s\n" l
 
   | IfGoto (x, l) ->
-      load_op "t0" x map;
+      load_op "t0" x map reg_map;
       Printf.printf "    bnez t0, %s\n" l
 
   | IfNotGoto (x, l) ->
-      load_op "t0" x map;
+      load_op "t0" x map reg_map;
       Printf.printf "    beqz t0, %s\n" l
 
   | Label l ->
@@ -294,99 +320,123 @@ let emit_tac fname tac_inst map current_args =
       let call_args, rem = split_at nargs !current_args in
       current_args := rem;
       let args = call_args in
-      
+
       let extra_space = if nargs > 8 then ((nargs - 8) * 4 + 15) / 16 * 16 else 0 in
       if extra_space > 0 then
         Printf.printf "    addi sp, sp, -%d\n" extra_space;
-        
+
       List.iteri (fun j arg ->
         if j < 8 then
-          load_op (Printf.sprintf "a%d" j) arg map
+          load_op (Printf.sprintf "a%d" j) arg map reg_map
         else
-          (load_op "t0" arg map;
+          (load_op "t0" arg map reg_map;
            Printf.printf "    sw t0, %d(sp)\n" ((j - 8) * 4))
       ) args;
-      
+
       Printf.printf "    call %s\n" callee;
-      
+
       if extra_space > 0 then
         Printf.printf "    addi sp, sp, %d\n" extra_space;
-        
-      store_op "a0" dest map
+
+      store_op "a0" dest map reg_map
 
   | Return (Some x) ->
-      load_op "a0" x map;
+      load_op "a0" x map reg_map;
       Printf.printf "    j .L_epilogue_%s\n" fname
 
   | Return None ->
       Printf.printf "    j .L_epilogue_%s\n" fname
 
-(* ============================================================ *)
-(* 翻译单个基本块 *)
-
-(* 翻译单个基本块 - 遇到跳转指令后停止输出后续指令 *)
-let emit_block fname (b: basic_block) map current_args =
+let emit_block fname (b: basic_block) map reg_map current_args =
   if b.label <> "entry" then
    Printf.printf "%s:\n" b.label;
   let rec emit_until_terminator = function
     | [] -> ()
     | inst :: rest ->
-        emit_tac fname inst map current_args;
-        (* 如果是终止指令，停止输出后续指令 *)
+        emit_tac fname inst map reg_map current_args;
         match inst with
         | Return _ | Goto _ ->
-            (* 后续指令是死代码，不输出 *)
             ()
         | _ ->
             emit_until_terminator rest
   in
   emit_until_terminator b.instrs
 
-(* ============================================================ *)
-(* 翻译单个函数 *)
-
 let emit_function (f: ir_func) =
   let slots, map = compute_offsets f in
-  let framesize = ((8 + slots * 4 + 15) / 16) * 16 in
-  
+
+  let reg_pool = ["s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8"; "s9"; "s10"; "s11"] in
+  let reg_map = Hashtbl.create 32 in
+  let used_regs = ref [] in
+  let assign op =
+    if not (Hashtbl.mem reg_map op) then
+      match List.find_opt (fun r -> not (List.mem r !used_regs)) reg_pool with
+      | Some r ->
+          Hashtbl.add reg_map op r;
+          used_regs := r :: !used_regs
+      | None -> ()
+  in
+  List.iter (fun name -> assign (Var name)) f.params;
+  List.iter (fun name -> assign (Var name)) (List.rev f.locals);
+  for t = 0 to f.temps - 1 do
+    assign (Temp t)
+  done;
+  let used_regs_list = List.rev !used_regs in
+  let saved_count = List.length used_regs_list in
+  let framesize = ((8 + slots * 4 + saved_count * 4 + 15) / 16) * 16 in
+
   Printf.printf "    .globl %s\n" f.fname;
   Printf.printf "%s:\n" f.fname;
-  
+
   Printf.printf "    addi sp, sp, -%d\n" framesize;
   Printf.printf "    sw ra, %d(sp)\n" (framesize - 4);
   Printf.printf "    sw fp, %d(sp)\n" (framesize - 8);
   Printf.printf "    addi fp, sp, %d\n" framesize;
-  
+
+  List.iteri (fun i r ->
+      let off = -8 - 4 * (slots + i + 1) in
+      Printf.printf "    sw %s, %d(fp)\n" r off)
+    used_regs_list;
+
   List.iteri (fun i name ->
-    if i < 8 then
-      let off = Hashtbl.find map (Var name) in
-      Printf.printf "    sw a%d, %d(fp)\n" i off
-  ) f.params;
-  
+      let op = Var name in
+      match Hashtbl.find_opt reg_map op with
+      | Some r ->
+          if i < 8 then
+            Printf.printf "    mv %s, a%d\n" r i
+          else
+            Printf.printf "    lw %s, %d(fp)\n" r ((i - 8) * 4)
+      | None ->
+          if i < 8 then
+            let off = Hashtbl.find map (Var name) in
+            Printf.printf "    sw a%d, %d(fp)\n" i off)
+    f.params;
+
   let current_args = ref [] in
-  emit_block f.fname f.entry map current_args;
-  List.iter (fun b -> emit_block f.fname b map current_args) f.blocks;
-  
+  emit_block f.fname f.entry map reg_map current_args;
+  List.iter (fun b -> emit_block f.fname b map reg_map current_args) f.blocks;
+
   Printf.printf ".L_epilogue_%s:\n" f.fname;
+  List.iteri (fun i r ->
+      let off = -8 - 4 * (slots + i + 1) in
+      Printf.printf "    lw %s, %d(fp)\n" r off)
+    used_regs_list;
   Printf.printf "    lw ra, -4(fp)\n";
   Printf.printf "    lw fp, -8(fp)\n";
   Printf.printf "    addi sp, sp, %d\n" framesize;
   Printf.printf "    ret\n\n"
 
-(* ============================================================ *)
-(* 整个程序的代码生成主入口点 *)
-
 let generate_riscv (prog: ir_program) =
   Printf.printf "    .text\n\n";
 
   List.iter (function
-    | GlobalVar (name, Some v) ->
+    | GlobalVar (name, Some v, _) ->
         Printf.printf "    .globl %s\n" name;
         Printf.printf "    .data\n";
         Printf.printf "    .align 2\n";
         Printf.printf "%s:\n" name;
         Printf.printf "    .word %d\n\n" v
-    | GlobalVar (name, None) ->
+    | GlobalVar (name, None, _) ->
         Printf.printf "    .globl %s\n" name;
         Printf.printf "    .data\n";
         Printf.printf "    .align 2\n";

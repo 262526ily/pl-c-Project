@@ -40,7 +40,7 @@ type ir_func = {
 }
 
 type ir_program_item =
- | GlobalVar of string * int option
+ | GlobalVar of string * int option * bool
  | Function of ir_func
 
 type ir_program = ir_program_item list
@@ -289,9 +289,16 @@ let gen_func (f: Ast.func_def) : ir_func =
        params = param_names;
        locals = g.locals;
        temps = g.temp_cnt;
-       entry = { label = "entry"; instrs = [] };
+       entry = { label = ".L_entry_" ^ f.Ast.name; instrs = [] };
        blocks = [] }
  | entry :: rest ->
+     let entry_label = ".L_entry_" ^ f.Ast.name in
+     let entry =
+       if entry.label = "entry" then
+         { entry with label = entry_label }
+       else
+         { label = entry_label; instrs = Label entry.label :: entry.instrs }
+     in
      { fname = f.Ast.name;
        params = param_names;
        locals = g.locals;
@@ -355,11 +362,11 @@ let generate (prog: Ast.prog) : ir_program =
    | Ast.UDecl (Ast.VarDecl (name, init)) -> 
        let v = eval_const !env init in
        (match v with Some n -> env := (name, n) :: !env | None -> ());
-       Some (GlobalVar (name, v))
+       Some (GlobalVar (name, v, false))
    | Ast.UDecl (Ast.ConstDecl (name, init)) ->
        let v = eval_const !env init in
        (match v with Some n -> env := (name, n) :: !env | None -> ());
-       Some (GlobalVar (name, v))
+       Some (GlobalVar (name, v, true))
  ) prog
 
 
@@ -419,9 +426,9 @@ let dump_func f =
 (* 打印整个 IR 程序（全局变量和所有函数） *)
 let dump_ir prog =
  List.iter (function
-   | GlobalVar (name, Some v) -> Printf.printf "global %s = %d
+   | GlobalVar (name, Some v, _) -> Printf.printf "global %s = %d
 " name v
-   | GlobalVar (name, None) -> Printf.printf "global %s
+   | GlobalVar (name, None, _) -> Printf.printf "global %s
 " name
    | Function f -> dump_func f
  ) prog
@@ -638,7 +645,7 @@ let arithmetic_optimize (prog: ir_program) : ir_program =
   (* 收集所有全局常量 *)
   let const_env = ref StringMap.empty in
   List.iter (function
-    | GlobalVar (name, Some value) ->
+    | GlobalVar (name, Some value, true) ->
         
         const_env := StringMap.add name value !const_env
     | _ -> ()
@@ -1027,10 +1034,22 @@ let tail_recursion (f: ir_func) (instrs: tac list) : tac list =
 
 (* 对外接口：对整个程序做尾递归优化 *)
 let tail_recursion_optimize (prog: ir_program) : ir_program =
+  let max_temp_for f instrs =
+    let n = count_temps instrs in
+    if n > f.temps then n else f.temps
+  in
   List.map (function
     | Function f ->
-        let new_instrs = tail_recursion f f.entry.instrs in
-        let new_entry = { f.entry with instrs = new_instrs } in
-        Function { f with entry = new_entry }
+        let new_entry_instrs = tail_recursion f f.entry.instrs in
+        let new_blocks =
+          List.map (fun b -> { b with instrs = tail_recursion f b.instrs }) f.blocks
+        in
+        let new_temps =
+          List.fold_left
+            (fun n b -> max n (max_temp_for f b.instrs))
+            (max_temp_for f new_entry_instrs)
+            new_blocks
+        in
+        Function { f with entry = { f.entry with instrs = new_entry_instrs }; blocks = new_blocks; temps = new_temps }
     | GlobalVar _ as g -> g
   ) prog
