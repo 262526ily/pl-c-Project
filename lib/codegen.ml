@@ -114,6 +114,139 @@ let store_op reg op map reg_map =
               Printf.printf "    sw %s, 0(t3)\n" reg))
 
 (* ============================================================ *)
+(* ?????????????????? *)
+
+let allocate_registers (f: ir_func) reg_pool =
+  let blocks_order = f.entry :: f.blocks in
+
+  let linear_instrs =
+    let acc = ref [] in
+    let add_block b =
+      let rec loop = function
+        | [] -> ()
+        | ((Goto _ | Return _) as i) :: _ ->
+            acc := i :: !acc
+        | i :: rest ->
+            acc := i :: !acc;
+            loop rest
+      in
+      loop b.instrs
+    in
+    List.iter add_block blocks_order;
+    Array.of_list (List.rev !acc)
+  in
+
+  let n = Array.length linear_instrs in
+  let label_map = Hashtbl.create 32 in
+  Array.iteri (fun i instr ->
+      match instr with
+      | Label l -> Hashtbl.replace label_map l i
+      | _ -> ())
+    linear_instrs;
+
+  let succ = Array.make n [] in
+  for i = 0 to n - 1 do
+    match linear_instrs.(i) with
+    | Goto l ->
+        succ.(i) <- (match Hashtbl.find_opt label_map l with Some j -> [j] | None -> [])
+    | IfGoto (_, l) | IfNotGoto (_, l) ->
+        let target = (match Hashtbl.find_opt label_map l with Some j -> [j] | None -> []) in
+        let fall = if i + 1 < n then [i + 1] else [] in
+        succ.(i) <- target @ fall
+    | Return _ ->
+        succ.(i) <- []
+    | _ ->
+        succ.(i) <- (if i + 1 < n then [i + 1] else [])
+  done;
+
+  let local_set = Hashtbl.create 32 in
+  List.iter (fun name -> Hashtbl.replace local_set (Var name) ()) f.params;
+  List.iter (fun name -> Hashtbl.replace local_set (Var name) ()) f.locals;
+  let is_allocatable = function
+    | Var name -> Hashtbl.mem local_set (Var name)
+    | Temp _ -> true
+    | Const _ -> false
+  in
+
+  let use_arr = Array.make n [] in
+  let def_arr = Array.make n [] in
+  let add_use i op = if is_allocatable op then use_arr.(i) <- op :: use_arr.(i) in
+  let add_def i op = if is_allocatable op then def_arr.(i) <- op :: def_arr.(i) in
+  Array.iteri (fun i instr ->
+      match instr with
+      | Assign (x, y) -> add_def i x; add_use i y
+      | AssignBinOp (x, _, y, z) -> add_def i x; add_use i y; add_use i z
+      | AssignUnOp (x, _, y) -> add_def i x; add_use i y
+      | IfGoto (x, _) | IfNotGoto (x, _) -> add_use i x
+      | Param x -> add_use i x
+      | Call (x, _, _) -> add_def i x
+      | Return (Some x) -> add_use i x
+      | Goto _ | Label _ | Return None -> ())
+    linear_instrs;
+
+  let rec union acc = function
+    | [] -> acc
+    | x :: rest ->
+        if List.mem x acc then union acc rest else union (x :: acc) rest
+  in
+  let rec diff a = function
+    | [] -> a
+    | x :: rest -> diff (List.filter (fun y -> y <> x) a) rest
+  in
+
+  let live_in = Array.make n [] in
+  let live_out = Array.make n [] in
+  for i = n - 1 downto 0 do
+    live_out.(i) <- List.fold_left (fun acc j -> union acc live_in.(j)) [] succ.(i);
+    live_in.(i) <- union use_arr.(i) (diff live_out.(i) def_arr.(i))
+  done;
+
+  let intervals = Hashtbl.create 64 in
+  let update op i =
+    let st = i and stop = i + 1 in
+    match Hashtbl.find_opt intervals op with
+    | None -> Hashtbl.replace intervals op (st, stop)
+    | Some (a, b) -> Hashtbl.replace intervals op (min a st, max b stop)
+  in
+  for i = 0 to n - 1 do
+    List.iter (fun op -> update op i) live_in.(i);
+    List.iter (fun op -> update op i) live_out.(i)
+  done;
+
+  let interval_list =
+    Hashtbl.fold (fun op (st, stop) acc -> (op, st, stop) :: acc) intervals []
+  in
+  let interval_list =
+    List.sort (fun (_, s1, _) (_, s2, _) -> compare s1 s2) interval_list
+  in
+
+  let reg_map = Hashtbl.create 32 in
+  let free_regs = ref reg_pool in
+  let active = ref [] in
+  let expire st =
+    let expired, remaining = List.partition (fun (_, _, stop) -> stop <= st) !active in
+    List.iter (fun (_, r, _) -> free_regs := r :: !free_regs) expired;
+    active := remaining
+  in
+  List.iter (fun (op, st, stop) ->
+      expire st;
+      match !free_regs with
+      | r :: rest ->
+          free_regs := rest;
+          Hashtbl.replace reg_map op r;
+          active := (op, r, stop) :: !active
+      | [] -> ())
+    interval_list;
+
+  let used_regs_list =
+    List.filter
+      (fun r ->
+        Hashtbl.fold (fun _ r' acc -> acc || r = r') reg_map false)
+      reg_pool
+  in
+  (reg_map, used_regs_list)
+
+(* ============================================================ *)
 (* ?????????? *)
 
 let compute_offsets (f: ir_func) =
@@ -366,22 +499,7 @@ let emit_function (f: ir_func) =
   let slots, map = compute_offsets f in
 
   let reg_pool = ["s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8"; "s9"; "s10"; "s11"] in
-  let reg_map = Hashtbl.create 32 in
-  let used_regs = ref [] in
-  let assign op =
-    if not (Hashtbl.mem reg_map op) then
-      match List.find_opt (fun r -> not (List.mem r !used_regs)) reg_pool with
-      | Some r ->
-          Hashtbl.add reg_map op r;
-          used_regs := r :: !used_regs
-      | None -> ()
-  in
-  List.iter (fun name -> assign (Var name)) f.params;
-  List.iter (fun name -> assign (Var name)) (List.rev f.locals);
-  for t = 0 to f.temps - 1 do
-    assign (Temp t)
-  done;
-  let used_regs_list = List.rev !used_regs in
+  let reg_map, used_regs_list = allocate_registers f reg_pool in
   let saved_count = List.length used_regs_list in
   let framesize = ((8 + slots * 4 + saved_count * 4 + 15) / 16) * 16 in
 
