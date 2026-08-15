@@ -139,7 +139,7 @@ let compute_offsets (f: ir_func) =
   let local_slots = ref 0 in
   let map = Hashtbl.create 32 in
 
-  List.iteri (fun i name ->
+  List.iter (fun name ->
     incr local_slots;
     Hashtbl.add map (Var name) (-8 - 4 * !local_slots)
   ) f.params;
