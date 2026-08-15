@@ -1,68 +1,78 @@
-(* lib/ir.ml
- * 
- * 实现了一个编译器中间表示（IR）生成器。
- * 将抽象语法树（AST）转换为三地址码（TAC）形式的中级中间表示，
- * 并支持基本块划分、短路求值、循环控制流（break/continue）等功能。
- * 最后提供了一组打印函数，用于输出 IR 的可读形式。
- *)
+(* lib/ir.ml *)
 
- module StringMap = Map.Make(String)
-
- type operand =
- | Const of int
- | Var of string
- | Temp of int
+type operand =
+  | Const of int
+  | Var of string
+  | Temp of int
 
 type tac =
- | Assign of operand * operand
- | AssignBinOp of operand * Ast.binop * operand * operand
- | AssignUnOp of operand * Ast.unop * operand
- | Goto of string
- | IfGoto of operand * string
- | IfNotGoto of operand * string
- | Label of string
- | Param of operand
- | Call of operand * string * int
- | Return of operand option
+  | Assign of operand * operand
+  | AssignBinOp of operand * Ast.binop * operand * operand
+  | AssignUnOp of operand * Ast.unop * operand
+  | Goto of string
+  | IfGoto of operand * string
+  | IfNotGoto of operand * string
+  | Label of string
+  | Param of operand
+  | Call of operand * string * int
+  | Return of operand option
 
 type basic_block = {
- label: string;
- instrs: tac list;
+  label: string;
+  instrs: tac list;
 }
 
 type ir_func = {
- fname: string;
- params: string list;
- locals: string list;
- temps: int;
- entry: basic_block;
- blocks: basic_block list;
+  fname: string;
+  params: string list;
+  locals: string list;
+  temps: int;
+  entry: basic_block;
+  blocks: basic_block list;
 }
 
 type ir_program_item =
- | GlobalVar of string * int option
- | Function of ir_func
+  | GlobalVar of string * int option
+  | Function of ir_func
 
 type ir_program = ir_program_item list
 
 type gen = {
- mutable temp_cnt: int;
- mutable instrs: tac list;
- mutable locals: string list;
- mutable unique_cnt: int;
- mutable scopes: (string * string) list list;
+  mutable temp_cnt: int;
+  mutable instrs: tac list;
+  mutable locals: string list;
+  mutable unique_cnt: int;
+  mutable scopes: (string * string) list list;
 }
 
-(* 创建一个新的 IR 生成器状态，初始化临时变量和标签计数器 *)
+(* ============================================================ *)
+(* 常量求值 - 必须在 gen_normal_binop 之前定义 *)
+
+let eval_binop = Ast.(function
+  | Add -> ( + )
+  | Sub -> ( - )
+  | Mul -> ( * )
+  | Div -> ( / )
+  | Mod -> ( mod )
+  | Eq -> (fun a b -> if a = b then 1 else 0)
+  | Ne -> (fun a b -> if a <> b then 1 else 0)
+  | Lt -> (fun a b -> if a < b then 1 else 0)
+  | Gt -> (fun a b -> if a > b then 1 else 0)
+  | Le -> (fun a b -> if a <= b then 1 else 0)
+  | Ge -> (fun a b -> if a >= b then 1 else 0)
+  | And -> (fun a b -> if a <> 0 && b <> 0 then 1 else 0)
+  | Or -> (fun a b -> if a <> 0 || b <> 0 then 1 else 0))
+
+(* ============================================================ *)
+(* 创建 IR 生成器 *)
+
 let new_gen () = { temp_cnt = 0; instrs = []; locals = []; unique_cnt = 0; scopes = [] }
 
-(* 生成一个新的临时变量（Temp n），并递增计数器 *)
 let fresh_temp g =
- let t = g.temp_cnt in
- g.temp_cnt <- t + 1;
- Temp t
+  let t = g.temp_cnt in
+  g.temp_cnt <- t + 1;
+  Temp t
 
-(* 生成一个新的标签（如 "L0"），并递增计数器 *)
 let global_label_cnt = ref 0
 
 let fresh_label () =
@@ -70,967 +80,328 @@ let fresh_label () =
   global_label_cnt := l + 1;
   "L" ^ string_of_int l
 
-(* 向当前生成器的指令列表中添加一条 TAC 指令 *)
 let emit g i = g.instrs <- i :: g.instrs
 
-(* 将变量名加入当前函数的局部变量列表（去重） *)
 let add_local g name = if not (List.mem name g.locals) then g.locals <- name :: g.locals
 
+(* ============================================================ *)
+(* 作用域管理 *)
 
-(* 作用域感知的局部变量唯一命名：
-  同名变量在不同作用域中会生成不同的 IR 名字（如 x$0、x$1），
-  避免被遮蔽的变量在代码生成时塌缩到同一个栈槽。 *)
-
-(* 进入新的局部作用域（对应一个花括号块或函数参数区） *)
 let enter_scope g = g.scopes <- [] :: g.scopes
 
-(* 退出当前作用域 *)
 let exit_scope g =
- match g.scopes with
- | _ :: rest -> g.scopes <- rest
- | [] -> failwith "scope underflow"
+  match g.scopes with
+  | _ :: rest -> g.scopes <- rest
+  | [] -> failwith "scope underflow"
 
-(* 从内向外查找名字的局部重命名 *)
 let rec find_binding name = function
- | [] -> None
- | scope :: rest ->
-     (match List.assoc_opt name scope with
-      | Some u -> Some u
-      | None -> find_binding name rest)
+  | [] -> None
+  | scope :: rest ->
+      (match List.assoc_opt name scope with
+       | Some u -> Some u
+       | None -> find_binding name rest)
 
-(* 解析变量名：局部变量返回其唯一名；未找到则视为全局符号，保持原名 *)
 let resolve_name g name =
- match find_binding name g.scopes with
- | Some u -> u
- | None -> name
+  match find_binding name g.scopes with
+  | Some u -> u
+  | None -> name
 
-(* 为当前作用域的新声明分配唯一名（$ 不会出现在用户标识符中，避免冲突） *)
-let bind g name =
- let u = Printf.sprintf "%s$%d" name g.unique_cnt in
- g.unique_cnt <- g.unique_cnt + 1;
- (match g.scopes with
-  | scope :: rest -> g.scopes <- ((name, u) :: scope) :: rest
-  | [] -> g.scopes <- [[(name, u)]]);
- add_local g u;
- u
+(* ============================================================ *)
+(* 绑定函数 - 区分参数和局部变量 *)
 
+(* 为参数绑定：不加入 locals 列表 *)
+let bind_param g name =
+  let u = Printf.sprintf "%s$%d" name g.unique_cnt in
+  g.unique_cnt <- g.unique_cnt + 1;
+  (match g.scopes with
+   | scope :: rest -> g.scopes <- ((name, u) :: scope) :: rest
+   | [] -> g.scopes <- [[(name, u)]]);
+  (* 参数不加入 locals！*)
+  u
 
-(* 表达式生成（支持短路计算） *)
+(* 为局部变量绑定：加入 locals 列表 *)
+let bind_local g name =
+  let u = Printf.sprintf "%s$%d" name g.unique_cnt in
+  g.unique_cnt <- g.unique_cnt + 1;
+  (match g.scopes with
+   | scope :: rest -> g.scopes <- ((name, u) :: scope) :: rest
+   | [] -> g.scopes <- [[(name, u)]]);
+  add_local g u;
+  u
 
-(* 将 AST 表达式转换为 TAC 操作数，生成对应的中间代码 *)
+(* ============================================================ *)
+(* 表达式生成 *)
+
 let rec gen_expr g (e: Ast.expr) : operand =
- match e with
- | Ast.EInt n -> Const n
- | Ast.EId name -> Var (resolve_name g name)
- | Ast.EBinOp (op, e1, e2) ->
-     (match op with
-      | Ast.And -> gen_short_circuit g e1 e2 true
-      | Ast.Or  -> gen_short_circuit g e1 e2 false
-      | _ -> gen_normal_binop g op e1 e2)
- | Ast.EUnOp (op, e) ->
-     let o = gen_expr g e in
-     let result = fresh_temp g in
-     emit g (AssignUnOp (result, op, o));
-     result
- | Ast.ECall (fname, args) ->
-     let arg_ops = List.rev (List.map (gen_expr g) args) in
-     List.iter (fun a -> emit g (Param a)) arg_ops;
-     let result = fresh_temp g in
-     emit g (Call (result, fname, List.length args));
-     result
+  match e with
+  | Ast.EInt n -> Const n
+  | Ast.EId name -> Var (resolve_name g name)
+  | Ast.EBinOp (op, e1, e2) ->
+      (match op with
+       | Ast.And -> gen_short_circuit g e1 e2 true
+       | Ast.Or  -> gen_short_circuit g e1 e2 false
+       | _ -> gen_normal_binop g op e1 e2)
+  | Ast.EUnOp (op, e) ->
+      let o = gen_expr g e in
+      let result = fresh_temp g in
+      emit g (AssignUnOp (result, op, o));
+      result
+  | Ast.ECall (fname, args) ->
+      let arg_ops = List.rev (List.map (gen_expr g) args) in
+      List.iter (fun a -> emit g (Param a)) arg_ops;
+      let result = fresh_temp g in
+      emit g (Call (result, fname, List.length args));
+      result
 
-(* 生成普通二元运算的 TAC 代码（非短路运算） *)
 and gen_normal_binop g op e1 e2 =
- let o1 = gen_expr g e1 in
- let o2 = gen_expr g e2 in
- let result = fresh_temp g in
- emit g (AssignBinOp (result, op, o1, o2));
- result
+  let o1 = gen_expr g e1 in
+  let o2 = gen_expr g e2 in
+  (* 常量折叠：如果两个操作数都是常量，直接返回常量 *)
+  (match o1, o2 with
+   | Const a, Const b ->
+       Const (eval_binop op a b)  (* eval_binop 现在已定义 *)
+   | _ ->
+       let result = fresh_temp g in
+       emit g (AssignBinOp (result, op, o1, o2));
+       result)
 
-(* 生成逻辑与/或的短路求值 TAC 代码 *)
 and gen_short_circuit g e1 e2 is_and =
- let result = fresh_temp g in
- let short_l = fresh_label () in
- let end_l = fresh_label () in
+  let result = fresh_temp g in
+  let short_l = fresh_label () in
+  let end_l = fresh_label () in
 
- let o1 = gen_expr g e1 in
- emit g (Assign (result, o1));
+  let o1 = gen_expr g e1 in
+  emit g (Assign (result, o1));
 
- if is_and then
-   emit g (IfNotGoto (result, short_l))
- else
-   emit g (IfGoto (result, short_l));
+  if is_and then
+    emit g (IfNotGoto (result, short_l))
+  else
+    emit g (IfGoto (result, short_l));
 
- let o2 = gen_expr g e2 in
- emit g (Assign (result, o2));
- emit g (Goto end_l);
+  let o2 = gen_expr g e2 in
+  emit g (Assign (result, o2));
+  emit g (Goto end_l);
 
- emit g (Label short_l);
- let short_val = if is_and then Const 0 else Const 1 in
- emit g (Assign (result, short_val));
+  emit g (Label short_l);
+  let short_val = if is_and then Const 0 else Const 1 in
+  emit g (Assign (result, short_val));
 
- emit g (Label end_l);
- result
+  emit g (Label end_l);
+  result
 
-
+(* ============================================================ *)
 (* 语句生成 *)
 
 type loop_labels = {
- break_l: string;
- continue_l: string;
+  break_l: string;
+  continue_l: string;
 }
 
-(* 将 AST 语句转换为 TAC 代码，支持 break/continue 和循环结构 *)
 let rec gen_stmt g (loop: loop_labels option) (s: Ast.stmt) : unit =
- match s with
- | Ast.SBlock stmts ->
-     enter_scope g;
-     List.iter (gen_stmt g loop) stmts;
-     exit_scope g
- | Ast.SEmpty -> ()
- | Ast.SExpr e -> 
-     let _ = gen_expr g e in ()
- | Ast.SDecl (Ast.VarDecl (name, init)) ->
-     let t = gen_expr g init in
-     let u = bind g name in
-     emit g (Assign (Var u, t))
- | Ast.SDecl (Ast.ConstDecl (name, init)) ->
-     let t = gen_expr g init in
-     let u = bind g name in
-     emit g (Assign (Var u, t))
- | Ast.SAssign (name, e) ->
-     let t = gen_expr g e in
-     emit g (Assign (Var (resolve_name g name), t))
- | Ast.SIf (cond, then_s, else_s) ->
-     let else_l = fresh_label () in
-     let end_l = fresh_label () in
-     let cond_t = gen_expr g cond in
-     emit g (IfNotGoto (cond_t, else_l));
-     gen_stmt g loop then_s;
-     emit g (Goto end_l);
-     emit g (Label else_l);
-     Option.iter (gen_stmt g loop) else_s;
-     emit g (Label end_l)
- | Ast.SWhile (cond, body) ->
-     let cond_l = fresh_label () in
-     let body_l = fresh_label () in
-     let end_l = fresh_label () in
-     let new_loop = { break_l = end_l; continue_l = cond_l } in
+  match s with
+  | Ast.SBlock stmts ->
+      enter_scope g;
+      List.iter (gen_stmt g loop) stmts;
+      exit_scope g
+  | Ast.SEmpty -> ()
+  | Ast.SExpr e -> 
+      let _ = gen_expr g e in ()
+  | Ast.SDecl (Ast.VarDecl (name, init)) ->
+      let t = gen_expr g init in
+      let u = bind_local g name in
+      emit g (Assign (Var u, t))
+  | Ast.SDecl (Ast.ConstDecl (name, init)) ->
+      let t = gen_expr g init in
+      let u = bind_local g name in
+      emit g (Assign (Var u, t))
+  | Ast.SAssign (name, e) ->
+      let t = gen_expr g e in
+      emit g (Assign (Var (resolve_name g name), t))
+  | Ast.SIf (cond, then_s, else_s) ->
+      let else_l = fresh_label () in
+      let end_l = fresh_label () in
+      let cond_t = gen_expr g cond in
+      emit g (IfNotGoto (cond_t, else_l));
+      gen_stmt g loop then_s;
+      emit g (Goto end_l);
+      emit g (Label else_l);
+      Option.iter (gen_stmt g loop) else_s;
+      emit g (Label end_l)
+  | Ast.SWhile (cond, body) ->
+      let cond_l = fresh_label () in
+      let body_l = fresh_label () in
+      let end_l = fresh_label () in
+      let new_loop = { break_l = end_l; continue_l = cond_l } in
 
-     
-     emit g (Label cond_l);
-     let cond_t = gen_expr g cond in
-     emit g (IfNotGoto (cond_t, end_l));
+      emit g (Label cond_l);
+      let cond_t = gen_expr g cond in
+      emit g (IfNotGoto (cond_t, end_l));
 
-     emit g (Label body_l);
-     gen_stmt g (Some new_loop) body;
-     emit g (Goto cond_l);
+      emit g (Label body_l);
+      gen_stmt g (Some new_loop) body;
+      emit g (Goto cond_l);
 
-     emit g (Label end_l)
- | Ast.SBreak ->
-     (match loop with
-      | Some l -> emit g (Goto l.break_l)
-      | None -> failwith "Break outside loop")
- | Ast.SContinue ->
-     (match loop with
-      | Some l -> emit g (Goto l.continue_l)
-      | None -> failwith "Continue outside loop")
- | Ast.SReturn (Some e) ->
-     let t = gen_expr g e in
-     emit g (Return (Some t))
- | Ast.SReturn None ->
-     emit g (Return None)
-
-
-(* 基本块划分 *)
-
-(* 将 TAC 指令列表按 Label 划分为基本块列表 *)
-let split_blocks (instrs: tac list) : basic_block list =
- let rec split current_label current acc = function
-   | [] ->
-       let block = { label = current_label; instrs = List.rev current } in
-       List.rev (block :: acc)
-   | (Label l) :: rest ->
-       let block = { label = current_label; instrs = List.rev current } in
-       split l [] (block :: acc) rest
-   | i :: rest ->
-       split current_label (i :: current) acc rest
- in
- match instrs with
- | (Label l) :: rest -> split l [] [] rest
- | _ -> split "entry" [] [] instrs
-
-
-(* 函数生成 *)
-
-(* 将 AST 函数定义转换为完整的 IR 函数（含基本块划分） *)
-let gen_func (f: Ast.func_def) : ir_func =
- let g = new_gen () in
- enter_scope g;
- let param_names = List.map (fun p -> bind g p) f.Ast.params in
- gen_stmt g None f.Ast.body;
- exit_scope g;
-
- (* FIX: 确保 void 函数有 return，避免空指令序列 *)
- (match f.Ast.retty with
-  | "void" -> 
-      if g.instrs = [] || 
-         (match List.hd g.instrs with Return _ -> false | _ -> true) then
-        emit g (Return None)
-  | _ -> ());
-
- let all_instrs = List.rev g.instrs in
- let blocks = split_blocks all_instrs in
-
- (* FIX: 处理空块情况 *)
- match blocks with
- | [] ->
-     { fname = f.Ast.name;
-       params = param_names;
-       locals = g.locals;
-       temps = g.temp_cnt;
-       entry = { label = "entry"; instrs = [] };
-       blocks = [] }
- | entry :: rest ->
-     { fname = f.Ast.name;
-       params = param_names;
-       locals = g.locals;
-       temps = g.temp_cnt;
-       entry;
-       blocks = rest }
-
-
-(* 程序生成 *)
-
-(* 编译期常量求值：用于计算全局变量/常量的静态初值（含常量链、算术、比较等） *)
-let eval_binop = Ast.(function
- | Add -> ( + )
- | Sub -> ( - )
- | Mul -> ( * )
- | Div -> ( / )
- | Mod -> ( mod )
- | Eq -> (fun a b -> if a = b then 1 else 0)
- | Ne -> (fun a b -> if a <> b then 1 else 0)
- | Lt -> (fun a b -> if a < b then 1 else 0)
- | Gt -> (fun a b -> if a > b then 1 else 0)
- | Le -> (fun a b -> if a <= b then 1 else 0)
- | Ge -> (fun a b -> if a >= b then 1 else 0)
- | And -> (fun a b -> if a <> 0 && b <> 0 then 1 else 0)
- | Or -> (fun a b -> if a <> 0 || b <> 0 then 1 else 0))
-
-(* 在给定全局环境中求值表达式；无法确定时返回 None *)
-let rec eval_const (env: (string * int) list) (e: Ast.expr) : int option =
- match e with
- | Ast.EInt n -> Some n
- | Ast.EId name -> List.assoc_opt name env
- | Ast.EBinOp (op, e1, e2) ->
-     (* 对 && / || 做短路求值，避免 0 && (1/0) 之类的除零 *)
-     (match op, eval_const env e1 with
-      | Ast.And, Some 0 -> Some 0
-      | Ast.Or, Some n when n <> 0 -> Some 1
-      | _, Some a ->
-          (match eval_const env e2 with
-           | Some b ->
-               (match op with
-                | Ast.Div | Ast.Mod when b = 0 -> None
-                | _ -> Some (eval_binop op a b))
-           | None -> None)
-      | _, None -> None)
- | Ast.EUnOp (op, e) ->
-     (match eval_const env e with
-      | Some n ->
-          (match op with
-           | Ast.Pos -> Some n
-           | Ast.Neg -> Some (-n)
-           | Ast.Not -> Some (if n = 0 then 1 else 0))
-      | None -> None)
- | Ast.ECall _ -> None
-
-(* 将 AST 程序（函数和全局变量声明列表）转换为 IR 程序 *)
-let generate (prog: Ast.prog) : ir_program =
- (* 按声明顺序累积的全局常量/变量求值环境 *)
- let env = ref [] in
- List.filter_map (function
-   | Ast.UFunc f -> Some (Function (gen_func f))
-   | Ast.UDecl (Ast.VarDecl (name, init)) -> 
-       let v = eval_const !env init in
-       (match v with Some n -> env := (name, n) :: !env | None -> ());
-       Some (GlobalVar (name, v))
-   | Ast.UDecl (Ast.ConstDecl (name, init)) ->
-       let v = eval_const !env init in
-       (match v with Some n -> env := (name, n) :: !env | None -> ());
-       Some (GlobalVar (name, v))
- ) prog
-
-
-(* 打印 *)
-
-(* 将操作数（Const/Var/Temp）转换为字符串 *)
-let op_str = function
- | Const n -> string_of_int n
- | Var s -> s
- | Temp n -> "t" ^ string_of_int n
-
-(* 将 AST 二元运算符转换为对应的字符串表示 *)
-let binop_str = Ast.(function
- | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%"
- | Eq -> "==" | Ne -> "!=" | Lt -> "<" | Gt -> ">" | Le -> "<=" | Ge -> ">="
- | And -> "&&" | Or -> "||"
-)
-
-(* 将 AST 一元运算符转换为对应的字符串表示 *)
-let unop_str = Ast.(function
- | Pos -> "+" | Neg -> "-" | Not -> "!"
-)
-
-(* 将单条 TAC 指令转换为可读的字符串 *)
-let tac_str = function
- | Assign (x, y) -> Printf.sprintf "%s = %s" (op_str x) (op_str y)
- | AssignBinOp (x, op, y, z) ->
-     Printf.sprintf "%s = %s %s %s" (op_str x) (op_str y) (binop_str op) (op_str z)
- | AssignUnOp (x, op, y) ->
-     Printf.sprintf "%s = %s%s" (op_str x) (unop_str op) (op_str y)
- | Goto l -> "goto " ^ l
- | IfGoto (x, l) -> Printf.sprintf "if %s goto %s" (op_str x) l
- | IfNotGoto (x, l) -> Printf.sprintf "ifFalse %s goto %s" (op_str x) l
- | Label l -> l ^ ":"
- | Param x -> "param " ^ op_str x
- | Call (x, f, n) -> Printf.sprintf "%s = call %s, %d" (op_str x) f n
- | Return (Some x) -> "return " ^ op_str x
- | Return None -> "return"
-
-(* 打印一个基本块的标签及其所有指令 *)
-let dump_block b =
- Printf.printf "%s:
-" b.label;
- List.iter (fun i -> Printf.printf "  %s
-" (tac_str i)) b.instrs
-
-(* 打印一个 IR 函数的完整信息（参数、局部变量、基本块） *)
-let dump_func f =
- Printf.printf "\nfunc %s(%s):
-" f.fname (String.concat ", " f.params);
- Printf.printf "  locals: [%s]
-" (String.concat ", " f.locals);
- Printf.printf "  temps: %d\n\n" f.temps;
- dump_block f.entry;
- List.iter dump_block f.blocks
-
-(* 打印整个 IR 程序（全局变量和所有函数） *)
-let dump_ir prog =
- List.iter (function
-   | GlobalVar (name, Some v) -> Printf.printf "global %s = %d
-" name v
-   | GlobalVar (name, None) -> Printf.printf "global %s
-" name
-   | Function f -> dump_func f
- ) prog
+      emit g (Label end_l)
+  | Ast.SBreak ->
+      (match loop with
+       | Some l -> emit g (Goto l.break_l)
+       | None -> failwith "Break outside loop")
+  | Ast.SContinue ->
+      (match loop with
+       | Some l -> emit g (Goto l.continue_l)
+       | None -> failwith "Continue outside loop")
+  | Ast.SReturn (Some e) ->
+      let t = gen_expr g e in
+      emit g (Return (Some t))
+  | Ast.SReturn None ->
+      emit g (Return None)
 
 (* ============================================================ *)
-(* 优化 Pass：常量折叠与算术运算优化 *)
+(* 基本块划分 *)
 
-(* 判断操作数是否为常量 *)
-let is_const = function Const _ -> true | _ -> false
+let split_blocks (instrs: tac list) : basic_block list =
+  let rec split current_label current acc = function
+    | [] ->
+        let block = { label = current_label; instrs = List.rev current } in
+        List.rev (block :: acc)
+    | (Label l) :: rest ->
+        let block = { label = current_label; instrs = List.rev current } in
+        split l [] (block :: acc) rest
+    | i :: rest ->
+        split current_label (i :: current) acc rest
+  in
+  match instrs with
+  | (Label l) :: rest -> split l [] [] rest
+  | _ -> split "entry" [] [] instrs
 
-(* 提取常量值（仅当 is_const 为 true 时调用） *)
-let get_const = function Const n -> n | _ -> 0
+(* ============================================================ *)
+(* 函数生成 *)
 
-(* 判断操作数是否为特定常量值 *)
-let is_const_value op n = 
-  match op with Const v when v = n -> true | _ -> false
+let gen_func (f: Ast.func_def) : ir_func =
+  let g = new_gen () in
+  enter_scope g;
+  (* 参数使用 bind_param，不加入 locals *)
+  let param_names = List.map (fun p -> bind_param g p) f.Ast.params in
+  gen_stmt g None f.Ast.body;
+  exit_scope g;
 
-let is_const_zero op = is_const_value op 0
-let is_const_one op = is_const_value op 1
-let is_const_neg_one op = is_const_value op (-1)
-let is_const_two op = is_const_value op 2
+  (* 确保 void 函数有 return *)
+  (match f.Ast.retty with
+   | "void" -> 
+       if g.instrs = [] || 
+          (match List.hd g.instrs with Return _ -> false | _ -> true) then
+         emit g (Return None)
+   | _ -> ());
 
-(* 判断是否为 2 的幂，返回指数 *)
-let is_power_of_two n =
-  if n > 0 && (n land (n - 1)) = 0 then
-    Some (int_of_float (log (float n) /. log 2.0))
-  else
-    None
+  let all_instrs = List.rev g.instrs in
+  let blocks = split_blocks all_instrs in
 
-let is_const_power_of_two op =
-  match op with Const n -> is_power_of_two n | _ -> None
+  match blocks with
+  | [] ->
+      { fname = f.Ast.name;
+        params = param_names;
+        locals = g.locals;
+        temps = g.temp_cnt;
+        entry = { label = "entry"; instrs = [] };
+        blocks = [] }
+  | entry :: rest ->
+      { fname = f.Ast.name;
+        params = param_names;
+        locals = g.locals;
+        temps = g.temp_cnt;
+        entry;
+        blocks = rest }
 
-(* 二元运算常量求值 *)
-let eval_binop_const op n1 n2 =
-  match op with
-  | Ast.Add -> Some (n1 + n2)
-  | Ast.Sub -> Some (n1 - n2)
-  | Ast.Mul -> Some (n1 * n2)
-  | Ast.Div when n2 <> 0 -> Some (n1 / n2)
-  | Ast.Mod when n2 <> 0 -> Some (n1 mod n2)
-  | Ast.Eq -> Some (if n1 = n2 then 1 else 0)
-  | Ast.Ne -> Some (if n1 <> n2 then 1 else 0)
-  | Ast.Lt -> Some (if n1 < n2 then 1 else 0)
-  | Ast.Gt -> Some (if n1 > n2 then 1 else 0)
-  | Ast.Le -> Some (if n1 <= n2 then 1 else 0)
-  | Ast.Ge -> Some (if n1 >= n2 then 1 else 0)
-  | Ast.And -> Some (if n1 <> 0 && n2 <> 0 then 1 else 0)
-  | Ast.Or -> Some (if n1 <> 0 || n2 <> 0 then 1 else 0)
-  | _ -> None
+(* ============================================================ *)
+(* 程序生成 - eval_const 使用 eval_binop *)
 
-(* 一元运算常量求值 *)
-let eval_unop_const op n =
-  match op with
-  | Ast.Pos -> Some n
-  | Ast.Neg -> Some (-n)
-  | Ast.Not -> Some (if n = 0 then 1 else 0)
+let rec eval_const (env: (string * int) list) (e: Ast.expr) : int option =
+  match e with
+  | Ast.EInt n -> Some n
+  | Ast.EId name -> List.assoc_opt name env
+  | Ast.EBinOp (op, e1, e2) ->
+      (match op, eval_const env e1 with
+       | Ast.And, Some 0 -> Some 0
+       | Ast.Or, Some n when n <> 0 -> Some 1
+       | _, Some a ->
+           (match eval_const env e2 with
+            | Some b ->
+                (match op with
+                 | Ast.Div | Ast.Mod when b = 0 -> None
+                 | _ -> Some (eval_binop op a b))
+            | None -> None)
+       | _, None -> None)
+  | Ast.EUnOp (op, e) ->
+      (match eval_const env e with
+       | Some n ->
+           (match op with
+            | Ast.Pos -> Some n
+            | Ast.Neg -> Some (-n)
+            | Ast.Not -> Some (if n = 0 then 1 else 0))
+       | None -> None)
+  | Ast.ECall _ -> None
 
-(* 获取操作数的字符串表示（用于比较操作数是否相同） *)
-let op_to_string = function
+let generate (prog: Ast.prog) : ir_program =
+  let env = ref [] in
+  List.filter_map (function
+    | Ast.UFunc f -> Some (Function (gen_func f))
+    | Ast.UDecl (Ast.VarDecl (name, init)) -> 
+        let v = eval_const !env init in
+        (match v with Some n -> env := (name, n) :: !env | None -> ());
+        Some (GlobalVar (name, v))
+    | Ast.UDecl (Ast.ConstDecl (name, init)) ->
+        let v = eval_const !env init in
+        (match v with Some n -> env := (name, n) :: !env | None -> ());
+        Some (GlobalVar (name, v))
+  ) prog
+
+(* ============================================================ *)
+(* 打印 *)
+
+let op_str = function
   | Const n -> string_of_int n
   | Var s -> s
   | Temp n -> "t" ^ string_of_int n
 
-(* 判断两个操作数是否相同（变量/临时变量/常量） *)
-let same_operand op1 op2 =
-  match op1, op2 with
-  | Const n1, Const n2 -> n1 = n2
-  | Var s1, Var s2 -> s1 = s2
-  | Temp t1, Temp t2 -> t1 = t2
-  | _, _ -> false
+let binop_str = Ast.(function
+  | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%"
+  | Eq -> "==" | Ne -> "!=" | Lt -> "<" | Gt -> ">" | Le -> "<=" | Ge -> ">="
+  | And -> "&&" | Or -> "||"
+)
 
-(* ============================================================ *)
-(* 核心：单条指令的常量折叠与算术优化 *)
+let unop_str = Ast.(function
+  | Pos -> "+" | Neg -> "-" | Not -> "!"
+)
 
-let fold_one_tac inst =
-  match inst with
+let tac_str = function
+  | Assign (x, y) -> Printf.sprintf "%s = %s" (op_str x) (op_str y)
+  | AssignBinOp (x, op, y, z) ->
+      Printf.sprintf "%s = %s %s %s" (op_str x) (op_str y) (binop_str op) (op_str z)
+  | AssignUnOp (x, op, y) ->
+      Printf.sprintf "%s = %s%s" (op_str x) (unop_str op) (op_str y)
+  | Goto l -> "goto " ^ l
+  | IfGoto (x, l) -> Printf.sprintf "if %s goto %s" (op_str x) l
+  | IfNotGoto (x, l) -> Printf.sprintf "ifFalse %s goto %s" (op_str x) l
+  | Label l -> l ^ ":"
+  | Param x -> "param " ^ op_str x
+  | Call (x, f, n) -> Printf.sprintf "%s = call %s, %d" (op_str x) f n
+  | Return (Some x) -> "return " ^ op_str x
+  | Return None -> "return"
 
-  (* ===== 1. 常量赋值 ===== *)
-  | Assign (x, y) when is_const y ->
-      Some (Assign (x, y))
+let dump_block b =
+  Printf.printf "%s:\n" b.label;
+  List.iter (fun i -> Printf.printf "  %s\n" (tac_str i)) b.instrs
 
-  (* ===== 2. 二元运算：两个操作数都是常量 ===== *)
-  | AssignBinOp (x, op, y, z) when is_const y && is_const z ->
-      let n1 = get_const y in
-      let n2 = get_const z in
-      (match eval_binop_const op n1 n2 with
-       | Some result -> Some (Assign (x, Const result))
-       | None -> Some (AssignBinOp (x, op, y, z)))
+let dump_func f =
+  Printf.printf "\nfunc %s(%s):\n" f.fname (String.concat ", " f.params);
+  Printf.printf "  locals: [%s]\n" (String.concat ", " f.locals);
+  Printf.printf "  temps: %d\n\n" f.temps;
+  dump_block f.entry;
+  List.iter dump_block f.blocks
 
-  (* ===== 3. 加法：0 + z = z, y + 0 = y ===== *)
-  | AssignBinOp (x, Ast.Add, y, z) when is_const_zero y ->
-      Some (Assign (x, z))
-  | AssignBinOp (x, Ast.Add, y, z) when is_const_zero z ->
-      Some (Assign (x, y))
-
-  (* ===== 4. 加法：交换律，把常量放右边（便于后续模式匹配） ===== *)
-  | AssignBinOp (x, Ast.Add, y, z) when is_const y && not (is_const z) ->
-      Some (AssignBinOp (x, Ast.Add, z, y))
-
-  (* ===== 5. 减法：y - 0 = y ===== *)
-  | AssignBinOp (x, Ast.Sub, y, z) when is_const_zero z ->
-      Some (Assign (x, y))
-  (* 0 - z = -z *)
-  | AssignBinOp (x, Ast.Sub, y, z) when is_const_zero y ->
-      Some (AssignUnOp (x, Ast.Neg, z))
-  (* y - y = 0 *)
-  | AssignBinOp (x, Ast.Sub, y, z) when same_operand y z ->
-      Some (Assign (x, Const 0))
-
-  (* ===== 6. 乘法：0 * z = 0, y * 0 = 0 ===== *)
-  | AssignBinOp (x, Ast.Mul, y, z) when is_const_zero y || is_const_zero z ->
-      Some (Assign (x, Const 0))
-  (* 1 * z = z, y * 1 = y *)
-  | AssignBinOp (x, Ast.Mul, y, z) when is_const_one y ->
-      Some (Assign (x, z))
-  | AssignBinOp (x, Ast.Mul, y, z) when is_const_one z ->
-      Some (Assign (x, y))
-  (* -1 * z = -z, y * -1 = -y *)
-  | AssignBinOp (x, Ast.Mul, y, z) when is_const_neg_one y ->
-      Some (AssignUnOp (x, Ast.Neg, z))
-  | AssignBinOp (x, Ast.Mul, y, z) when is_const_neg_one z ->
-      Some (AssignUnOp (x, Ast.Neg, y))
-  (* 2 * z = z + z（加法比乘法快） *)
-  | AssignBinOp (x, Ast.Mul, y, z) when is_const_two y ->
-      Some (AssignBinOp (x, Ast.Add, z, z))
-  | AssignBinOp (x, Ast.Mul, y, z) when is_const_two z ->
-      Some (AssignBinOp (x, Ast.Add, y, y))
-
-  (* ===== 7. 除法：0 / z = 0（z != 0） ===== *)
-  | AssignBinOp (x, Ast.Div, y, _) when is_const_zero y ->
-      Some (Assign (x, Const 0))
-  (* y / 1 = y *)
-  | AssignBinOp (x, Ast.Div, y, z) when is_const_one z ->
-      Some (Assign (x, y))
-  (* y / -1 = -y *)
-  | AssignBinOp (x, Ast.Div, y, z) when is_const_neg_one z ->
-      Some (AssignUnOp (x, Ast.Neg, y))
-  (* y / y = 1（y != 0） *)
-  | AssignBinOp (x, Ast.Div, y, z) when same_operand y z ->
-      Some (Assign (x, Const 1))
-
-  (* ===== 8. 取模：0 % z = 0 ===== *)
-  | AssignBinOp (x, Ast.Mod, y, _) when is_const_zero y ->
-      Some (Assign (x, Const 0))
-  (* y % 1 = 0 *)
-  | AssignBinOp (x, Ast.Mod, _, z) when is_const_one z ->
-      Some (Assign (x, Const 0))
-  (* y % y = 0 *)
-  | AssignBinOp (x, Ast.Mod, y, z) when same_operand y z ->
-      Some (Assign (x, Const 0))
-
-  (* ===== 9. 逻辑与：0 && z = 0, y && 0 = 0 ===== *)
-  | AssignBinOp (x, Ast.And, y, z) when is_const_zero y || is_const_zero z ->
-      Some (Assign (x, Const 0))
-  (* 1 && z = z, y && 1 = y *)
-  | AssignBinOp (x, Ast.And, y, z) when is_const_one y ->
-      Some (Assign (x, z))
-  | AssignBinOp (x, Ast.And, y, z) when is_const_one z ->
-      Some (Assign (x, y))
-  (* y && y = y *)
-  | AssignBinOp (x, Ast.And, y, z) when same_operand y z ->
-      Some (Assign (x, y))
-
-  (* ===== 10. 逻辑或：1 || z = 1, y || 1 = 1 ===== *)
-  | AssignBinOp (x, Ast.Or, y, z) when is_const_one y || is_const_one z ->
-      Some (Assign (x, Const 1))
-  (* 0 || z = z, y || 0 = y *)
-  | AssignBinOp (x, Ast.Or, y, z) when is_const_zero y ->
-      Some (Assign (x, z))
-  | AssignBinOp (x, Ast.Or, y, z) when is_const_zero z ->
-      Some (Assign (x, y))
-  (* y || y = y *)
-  | AssignBinOp (x, Ast.Or, y, z) when same_operand y z ->
-      Some (Assign (x, y))
-
-  (* ===== 11. 比较运算：y == y = 1, y != y = 0 ===== *)
-  | AssignBinOp (x, Ast.Eq, y, z) when same_operand y z ->
-      Some (Assign (x, Const 1))
-  | AssignBinOp (x, Ast.Ne, y, z) when same_operand y z ->
-      Some (Assign (x, Const 0))
-  | AssignBinOp (x, Ast.Lt, y, z) when same_operand y z ->
-      Some (Assign (x, Const 0))
-  | AssignBinOp (x, Ast.Gt, y, z) when same_operand y z ->
-      Some (Assign (x, Const 0))
-  | AssignBinOp (x, Ast.Le, y, z) when same_operand y z ->
-      Some (Assign (x, Const 1))
-  | AssignBinOp (x, Ast.Ge, y, z) when same_operand y z ->
-      Some (Assign (x, Const 1))
-
-  (* ===== 12. 一元运算：-0 = 0, -(-1) = 1 ===== *)
-  | AssignUnOp (x, Ast.Neg, y) when is_const_zero y ->
-      Some (Assign (x, Const 0))
-  | AssignUnOp (x, Ast.Neg, y) when is_const_neg_one y ->
-      Some (Assign (x, Const 1))
-  (* !0 = 1, !1 = 0, !(-1) = 0 *)
-  | AssignUnOp (x, Ast.Not, y) when is_const_zero y ->
-      Some (Assign (x, Const 1))
-  | AssignUnOp (x, Ast.Not, y) when is_const_one y || is_const_neg_one y ->
-      Some (Assign (x, Const 0))
-
-  (* 一元运算常量折叠 *)
-  | AssignUnOp (x, op, y) when is_const y ->
-      (match eval_unop_const op (get_const y) with
-       | Some result -> Some (Assign (x, Const result))
-       | None -> Some (AssignUnOp (x, op, y)))
-
-  (* ===== 13. 无变化 ===== *)
-  | _ -> None
-
-(* ============================================================ *)
-(* 对外接口：对整个 IR 程序做常量折叠与算术优化 *)
-
-let arithmetic_optimize (prog: ir_program) : ir_program =
-  (* 收集所有全局常量 *)
-  let const_env = ref StringMap.empty in
+let dump_ir prog =
   List.iter (function
-    | GlobalVar (name, Some value) ->
-        
-        const_env := StringMap.add name value !const_env
-    | _ -> ()
-  ) prog;
-  
-  (* 简化：当左操作数是常量时 - 直接返回简化后的 operand *)
-  let simplify_with_const_left op const_val right =
-    match op, const_val with
-    | Ast.Add, 0 -> Some right   (* 0 + right = right *)
-    | Ast.Sub, 0 -> 
-        (* 0 - right = -right，需要用 AssignUnOp *)
-        (* 但我们不能在这里返回 UnOp，因为需要的是 operand *)
-        (* 所以返回 None，让 fold_one_tac 处理 *)
-        None
-    | Ast.Mul, 0 -> Some (Const 0)  (* 0 * right = 0 *)
-    | Ast.Mul, 1 -> Some right   (* 1 * right = right *)
-    | Ast.Div, 0 -> None  (* 0 / right = 0，但 right 可能为 0，保留 *)
-    | Ast.And, 0 -> Some (Const 0)  (* 0 && right = 0 *)
-    | Ast.And, 1 -> Some right   (* 1 && right = right *)
-    | Ast.Or, 0 -> Some right    (* 0 || right = right *)
-    | Ast.Or, 1 -> Some (Const 1)   (* 1 || right = 1 *)
-    | _ -> None
-  in
-  
-  (* 简化：当右操作数是常量时 *)
-  let simplify_with_const_right op left const_val =
-    match op, const_val with
-    | Ast.Add, 0 -> Some left    (* left + 0 = left *)
-    | Ast.Sub, 0 -> Some left    (* left - 0 = left *)
-    | Ast.Mul, 0 -> Some (Const 0)  (* left * 0 = 0 *)
-    | Ast.Mul, 1 -> Some left    (* left * 1 = left *)
-    | Ast.Div, 1 -> Some left    (* left / 1 = left *)
-    | Ast.Mod, 1 -> Some (Const 0)  (* left % 1 = 0 *)
-    | Ast.And, 0 -> Some (Const 0)  (* left && 0 = 0 *)
-    | Ast.And, 1 -> Some left    (* left && 1 = left *)
-    | Ast.Or, 0 -> Some left     (* left || 0 = left *)
-    | Ast.Or, 1 -> Some (Const 1)   (* left || 1 = 1 *)
-    | _ -> None
-  in
-  
-  (* 跟踪局部变量的常量值 *)
-  let local_consts = ref StringMap.empty in
-  
-  (* 清除常量跟踪（当变量被重新赋值时） *)
-  let clear_local name =
-    local_consts := StringMap.remove name !local_consts
-  in
-  
-  
-  (* 获取操作数的常量值 *)
-let get_const_value op =
-    match op with
-    | Const n -> Some n
-    | Var name -> 
-        (* 只检查全局常量，不追踪局部变量 *)
-        if StringMap.mem name !const_env then
-          Some (StringMap.find name !const_env)
-        else
-          None
-    | Temp _ -> 
-        None  (* 临时变量不追踪常量 *)
-    
-  in
-  
-  (* 记录常量值 *)
-  let set_local_const op value =
-    match op with
-    | Var name ->
-        local_consts := StringMap.add name value !local_consts
-    | Temp n ->
-        let key = "t" ^ string_of_int n in
-        local_consts := StringMap.add key value !local_consts
-    | _ -> ()
-  in
-  
-  (* 清除操作数的常量状态 *)
-  let clear_const op =
-    match op with
-    | Var name -> clear_local name
-    | Temp n -> clear_local ("t" ^ string_of_int n)
-    | _ -> ()
-  in
-  
-  (* 优化一条指令（带常量传播） *)
-  let fold_with_propagation inst =
-    match inst with
-    | Assign (x, y) ->
-        (match get_const_value y with
-         | Some n ->
-             set_local_const x n;
-             Some (Assign (x, Const n))
-         | None ->
-             clear_const x;
-             fold_one_tac inst)
-    
-    | AssignBinOp (x, op, y, z) ->
-        let y_const = get_const_value y in
-        let z_const = get_const_value z in
-        (match y_const, z_const with
-         | Some n1, Some n2 ->
-             (match eval_binop_const op n1 n2 with
-              | Some result ->
-                  set_local_const x result;
-                  Some (Assign (x, Const result))
-              | None ->
-                  clear_const x;
-                  fold_one_tac inst)
-         | Some n1, None ->
-             (match simplify_with_const_left op n1 z with
-              | Some simplified ->
-                  clear_const x;
-                  Some (Assign (x, simplified))
-              | None ->
-                  clear_const x;
-                  fold_one_tac inst)
-         | None, Some n2 ->
-             (match simplify_with_const_right op y n2 with
-              | Some simplified ->
-                  clear_const x;
-                  Some (Assign (x, simplified))
-              | None ->
-                  clear_const x;
-                  fold_one_tac inst)
-         | None, None ->
-             clear_const x;
-             fold_one_tac inst)
-    
-    | AssignUnOp (x, op, y) ->
-        (match get_const_value y with
-         | Some n ->
-             (match eval_unop_const op n with
-              | Some result ->
-                  set_local_const x result;
-                  Some (Assign (x, Const result))
-              | None ->
-                  clear_const x;
-                  fold_one_tac inst)
-         | None ->
-             clear_const x;
-             fold_one_tac inst)
-    
-    | Call (dest, _, _) ->
-        clear_const dest;
-        fold_one_tac inst
-    
-    (* ===== 新增：处理 Return 指令 ===== *)
-    | Return (Some x) ->
-        (match get_const_value x with
-         | Some n ->
-             (* 返回值是常量，替换为 Const n *)
-             Some (Return (Some (Const n)))
-         | None ->
-             fold_one_tac inst)
-    
-    | Return None ->
-        fold_one_tac inst
-    
-    | _ -> fold_one_tac inst
-   in
-  (* 优化基本块 *)
-  let fold_block (b: basic_block) : basic_block =
-    let new_instrs = List.fold_left (fun acc inst ->
-      match fold_with_propagation inst with
-      | Some folded -> folded :: acc
-      | None ->inst :: acc   (* 保留所有其他指令 *)
-    ) [] b.instrs in
-    { b with instrs = List.rev new_instrs }
-          
-    
-  in
-  
-  (* 优化函数 *)
-  let fold_func (f: ir_func) : ir_func =
-    local_consts := StringMap.empty;
-    { f with
-      entry = fold_block f.entry;
-      blocks = List.map fold_block f.blocks
-    }
-  in
-  
-  (* 应用到整个程序 *)
-  List.map (function
-    | Function f -> Function (fold_func f)
-    | GlobalVar _ as g -> g
-  ) prog
-
-
-
-
-(* ============================================================ *)
-(* 优化 Pass：公共子表达式消除 (CSE) *)
-
-module ExprMap = Map.Make(struct
-  type t = string
-  let compare = String.compare
-end)
-
-(* 表达式键类型 *)
-type expr_key = 
-  | BinOpKey of Ast.binop * string * string   (* op, left_key, right_key *)
-  | UnOpKey of Ast.unop * string              (* op, operand_key *)
-
-(* 获取操作数的键字符串 *)
-let op_key = function
-  | Const n -> "C" ^ string_of_int n
-  | Var name -> "V" ^ name
-  | Temp n -> "T" ^ string_of_int n
-
-(* 从指令生成表达式键 *)
-let get_expr_key inst =
-  match inst with
-  | AssignBinOp (_, op, y, z) ->
-      Some (BinOpKey (op, op_key y, op_key z))
-  | AssignUnOp (_, op, y) ->
-      Some (UnOpKey (op, op_key y))
-  | _ -> None
-
-(* 将表达式键转为字符串（用于 Map） *)
-let key_to_string = function
-  | BinOpKey (op, l, r) ->
-      let op_str = Ast.(function
-        | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%"
-        | Eq -> "==" | Ne -> "!=" | Lt -> "<" | Gt -> ">" | Le -> "<=" | Ge -> ">="
-        | And -> "&&" | Or -> "||"
-      ) op in
-      Printf.sprintf "(%s %s %s)" l op_str r
-  | UnOpKey (op, x) ->
-      let op_str = Ast.(function Pos -> "+" | Neg -> "-" | Not -> "!") op in
-      Printf.sprintf "(%s %s)" op_str x
-
-(* 获取指令定义的变量 *)
-let get_defined_operand inst =
-  match inst with
-  | Assign (x, _) -> Some x
-  | AssignBinOp (x, _, _, _) -> Some x
-  | AssignUnOp (x, _, _) -> Some x
-  | Call (x, _, _) -> Some x
-  | _ -> None
-
-(* 检查指令是否定义了一个值（可以被复用）*)
-let is_value_definition inst =
-  match inst with
-  | Assign _ -> true
-  | AssignBinOp _ -> true
-  | AssignUnOp _ -> true
-  | Call _ -> true
-  | _ -> false
-
-(* 检查操作数是否在表达式中被使用 *)
-let op_used_in_expr op expr_ops =
-  match op with
-  | Var name -> List.exists (function Var n -> n = name | _ -> false) expr_ops
-  | Temp n -> List.exists (function Temp m -> m = n | _ -> false) expr_ops
-  | Const _ -> false
-
-(* 获取表达式中的所有操作数 *)
-let ops_of_expr = function
-  | BinOpKey (_, _, _) -> 
-      (* 从字符串恢复操作数比较困难，所以我们使用原始操作数 *)
-      (* 改为在 CSE 时直接处理 tac 指令 *)
-      []
-  | UnOpKey _ -> []
-
-(* ============================================================ *)
-(* 基本块内公共子表达式消除 *)
-
-let cse_block (b: basic_block) : basic_block =
-    let expr_map = Hashtbl.create 32 in
-    
-    let rec process instrs acc =
-      match instrs with
-      | [] -> List.rev acc
-      | inst :: rest ->
-          let result =
-            match inst with
-            | AssignBinOp (x, op, y, z) ->
-                let key = Printf.sprintf "%s_%s_%s" 
-                  (match op with Ast.Add -> "+" | Ast.Sub -> "-" | Ast.Mul -> "*" | _ -> "?")
-                  (op_key y) (op_key z) in
-                (match Hashtbl.find_opt expr_map key with
-                 | Some existing_def ->
-                     Some (Assign (x, existing_def))
-                 | None ->
-                     Hashtbl.add expr_map key x;
-                     Some inst)
-            | _ -> Some inst
-          in
-          match result with
-          | Some inst' -> process rest (inst' :: acc)
-          | None -> process rest acc
-    in
-    
-    let new_instrs = process b.instrs [] in
-    { b with instrs = new_instrs }
-
-(* ============================================================ *)
-(* 对整个函数做 CSE（迭代到不动点）*)
-
-let cse_func (f: ir_func) : ir_func =
-  let rec iterate f' =
-    let new_entry = cse_block f'.entry in
-    let new_blocks = List.map cse_block f'.blocks in
-    let result = { f' with entry = new_entry; blocks = new_blocks } in
-    (* 简单迭代：如果块数或指令数变化了，继续迭代 *)
-    if result = f' then result
-    else iterate result
-  in
-  iterate f
-
-(* ============================================================ *)
-(* 对外接口：对整个 IR 程序做公共子表达式消除 *)
-
-let common_subexpression_elimination (prog: ir_program) : ir_program =
-  List.map (function
-    | Function f -> Function (cse_func f)
-    | GlobalVar _ as g -> g
-  ) prog
-
-(* ============================================================ *)
-(* 优化 Pass：尾递归优化 *)
-
-(* 遍历所有操作数 *)
-let iter_operands f = function
-  | Assign (x, y) -> f x; f y
-  | AssignBinOp (x, _, a, b) -> f x; f a; f b
-  | AssignUnOp (x, _, a) -> f x; f a
-  | IfGoto (a, _) | IfNotGoto (a, _) -> f a
-  | Param a -> f a
-  | Call (x, _, _) -> f x
-  | Return (Some a) -> f a
-  | Goto _ | Label _ | Return None -> ()
-
-(* 统计临时变量数量 *)
-let count_temps instrs =
-  let m = ref (-1) in
-  List.iter (iter_operands (function
-    | Temp t -> if t > !m then m := t
-    | _ -> ())) instrs;
-  !m + 1
-
-(* 对单个函数做尾递归优化 *)
-let tail_recursion (f: ir_func) (instrs: tac list) : tac list =
-  let fname = f.fname in
-  let params = f.params in
-  let nparams = List.length params in
-  let entry_label = f.entry.label in
-  let is_param o = match o with Var v -> List.mem v params | _ -> false in
-  let tmp = ref (count_temps instrs) in
-  let fresh () = let t = !tmp in incr tmp; Temp t in
-  
-  let rec loop acc = function
-    | [] -> List.rev acc
-    | (Param o :: rest) as instrs when nparams > 0 ->
-        let rec collect k acc_ps = function
-          | (Param p) :: r when k > 0 -> collect (k - 1) (p :: acc_ps) r
-          | r -> List.rev acc_ps, r
-        in
-        let ps, after = collect nparams [] instrs in
-        (match after with
-         | Call (d, callee, n) :: Return (Some d') :: rest'
-           when callee = fname && n = nparams
-             && List.length ps = nparams && d = d' ->
-             let args = List.rev ps in
-             let copies =
-               List.map (fun a -> if is_param a then Some (fresh ()) else None) args
-             in
-             let pre =
-               List.concat
-                 (List.map2 (fun a c ->
-                    match c with Some t -> [Assign (t, a)] | None -> [])
-                    args copies)
-             in
-             let assigns =
-               List.map2 (fun p (c, a) ->
-                 Assign (Var p, match c with Some t -> t | None -> a))
-                 params (List.combine copies args)
-             in
-             loop (List.rev_append (pre @ assigns @ [Goto entry_label]) acc) rest'
-         | _ -> loop (Param o :: acc) rest)
-    | Call (d, callee, 0) :: Return (Some d') :: rest
-      when callee = fname && nparams = 0 && d = d' ->
-        loop (Goto entry_label :: acc) rest
-    | i :: rest -> loop (i :: acc) rest
-  in
-  loop [] instrs
-
-(* 对外接口：对整个程序做尾递归优化 *)
-let tail_recursion_optimize (prog: ir_program) : ir_program =
-  List.map (function
-    | Function f ->
-        let new_instrs = tail_recursion f f.entry.instrs in
-        let new_entry = { f.entry with instrs = new_instrs } in
-        Function { f with entry = new_entry }
-    | GlobalVar _ as g -> g
+    | GlobalVar (name, Some v) -> Printf.printf "global %s = %d\n" name v
+    | GlobalVar (name, None) -> Printf.printf "global %s\n" name
+    | Function f -> dump_func f
   ) prog
