@@ -1474,14 +1474,14 @@ let inline_func (f: ir_func) (funcs: (string, ir_func) Hashtbl.t) (inlineable: (
 
 let inline_calls (prog: ir_program) : ir_program =
   let prog = ref prog in
-  for _ = 1 to 3 do
+  for _ = 1 to 2 do
     let analysis = global_analysis !prog in
     if Hashtbl.length analysis.fa_funcs >= 2 then (
       let inlineable = Hashtbl.create 16 in
       Hashtbl.iter (fun name f ->
         let ok =
           name <> "main"
-          && List.length (flatten_func f) <= 40
+          && List.length (flatten_func f) <= 30
           && not (is_recursive_func analysis.fa_funcs name)
           && not (has_loop_blocks (f.entry :: f.blocks))
           && S.is_empty (Hashtbl.find analysis.fa_writes name)
@@ -1609,109 +1609,13 @@ let licm_func (f: ir_func) (writes: (string, S.t) Hashtbl.t) : ir_func =
                    | _ -> false)
       in
       let hoist = ref [] in
-      List.iteri (fun bi (b: basic_block) ->
-        List.iteri
-          (fun pi inst -> if invariant inst then hoist := (h + bi, pi, b, inst) :: !hoist)
-          b.instrs)
+      List.iter (fun (b: basic_block) ->
+        List.iter (fun inst -> if invariant inst then hoist := (b, inst) :: !hoist) b.instrs)
         loop_blocks;
       let hoist = List.rev !hoist in
-      let all_uses_of inst =
-        match inst with
-        | Assign (_, y) -> [y]
-        | AssignBinOp (_, _, a, b) -> [a; b]
-        | AssignUnOp (_, _, a) -> [a]
-        | IfGoto (a, _) | IfNotGoto (a, _) -> [a]
-        | Param a -> [a]
-        | Call (d, _, _) -> [d]
-        | Return (Some a) -> [a]
-        | _ -> []
-      in
-      let loop_succs k =
-        let out = ref [] in
-        List.iter (function
-          | Goto l | IfGoto (_, l) | IfNotGoto (_, l) ->
-              (match Hashtbl.find_opt idx l with
-               | Some j when j >= h && j <= i -> out := j :: !out
-               | _ -> ())
-          | _ -> ())
-          (List.nth all k).instrs;
-        let terminated =
-          match List.rev (List.nth all k).instrs with
-          | (Goto _ | Return _) :: _ -> true
-          | _ -> false
-        in
-        if not terminated && k + 1 <= i then out := (k + 1) :: !out;
-        List.rev !out
-      in
-      let dom = Hashtbl.create 16 in
-      Hashtbl.replace dom h (IntSet.singleton h);
-      let rec dom_fixpoint () =
-        let changed = ref false in
-        for k = h + 1 to i do
-          let preds = ref [] in
-          for p = h to i do
-            if List.mem k (loop_succs p) then preds := p :: !preds
-          done;
-          let nd =
-            match !preds with
-            | [] -> IntSet.singleton k
-            | p0 :: ps ->
-                let acc =
-                  List.fold_left
-                    (fun acc p ->
-                       match Hashtbl.find_opt dom p with
-                       | Some d -> IntSet.inter acc d
-                       | None -> acc)
-                    (IntSet.of_list (List.init (i - h + 1) (fun x -> h + x)))
-                    (p0 :: ps)
-                in
-                IntSet.add k acc
-          in
-          (match Hashtbl.find_opt dom k with
-           | Some d when IntSet.equal d nd -> ()
-           | _ ->
-               Hashtbl.replace dom k nd;
-               changed := true)
-        done;
-        if !changed then dom_fixpoint ()
-      in
-      dom_fixpoint ();
-      let dominated_by def_blk blk =
-        if def_blk = blk then true
-        else
-          match Hashtbl.find_opt dom blk with
-          | Some d -> IntSet.mem def_blk d
-          | None -> false
-      in
-      let dom_check def_blk def_pos key =
-        let ok = ref true in
-        List.iteri (fun k (b: basic_block) ->
-          List.iteri (fun p inst ->
-            List.iter (fun o ->
-              if op_key o = Some key then (
-                if k < h || k > i then ok := false
-                else if k = def_blk then (if p <= def_pos then ok := false)
-                else if not (dominated_by def_blk k) then ok := false))
-              (all_uses_of inst))
-            b.instrs)
-          all;
-        !ok
-      in
-      let hoist =
-        List.filter (fun (bi, pi, _, inst) ->
-          match def_operand inst with
-          | Some d ->
-              (match op_key d with
-               | Some k -> dom_check bi pi k
-               | None -> false)
-          | None -> false)
-          hoist
-      in
       if hoist = [] then f
       else
-        let is_hoisted inst =
-          List.exists (fun (_, _, _, i') -> inst == i') hoist
-        in
+        let is_hoisted inst = List.exists (fun (_, i') -> inst == i') hoist in
         let new_loop =
           List.map (fun (b: basic_block) ->
             { b with instrs = List.filter (fun inst -> not (is_hoisted inst)) b.instrs })
@@ -1719,7 +1623,7 @@ let licm_func (f: ir_func) (writes: (string, S.t) Hashtbl.t) : ir_func =
         in
         let header_label = (List.nth all h).label in
         let pre_label = fresh_label () in
-        let pre_instrs = List.map (fun (_, _, _, inst) -> inst) hoist in
+        let pre_instrs = List.map snd hoist in
         let retarget instrs =
           List.map (function
             | Goto l when l = header_label -> Goto pre_label
@@ -1754,6 +1658,7 @@ let licm_loops (prog: ir_program) : ir_program =
 (* ---------- loop unrolling ---------- *)
 
 let unroll_func (f: ir_func) : ir_func =
+  let factor = 4 in
   let size_cap = 4000 in
   let all = f.entry :: f.blocks in
   let idx = Hashtbl.create 16 in
@@ -1782,9 +1687,7 @@ let unroll_func (f: ir_func) : ir_func =
         (fun best c -> if body_size c < body_size best then c else best)
         (List.hd cands) (List.tl cands)
     in
-    let bs = body_size (h, i) in
-    let factor = if bs <= 80 then 8 else 4 in
-    if bs > 200 then f
+    if body_size (h, i) > 60 then f
     else
       let hins = (List.nth all h).instrs in
       match List.rev hins with
@@ -1798,7 +1701,8 @@ let unroll_func (f: ir_func) : ir_func =
           in
           if S.mem exit_l loop_labels then f
           else if
-            List.length (flatten_func f) + (factor - 1) * (bs + 1) > size_cap
+            List.length (flatten_func f) + (factor - 1) * (body_size (h, i) + 1)
+            > size_cap
           then f
           else
             let header_label = (List.nth all h).label in
@@ -1814,42 +1718,84 @@ let unroll_func (f: ir_func) : ir_func =
               in
               go (h + 1) []
             in
-            let clone_hdrs = Array.init (factor - 1) (fun _ -> fresh_label ()) in
-            let clone_instrs lmap drop_last next_hdr instrs =
-              let len = List.length instrs in
-              let out = ref [] in
-              List.iteri (fun k inst ->
-                let is_last = k = len - 1 in
-                match inst with
-                | Goto _ when drop_last && is_last -> ()
-                | Goto target ->
-                    if target = header_label then out := Goto next_hdr :: !out
-                    else if S.mem target loop_labels then (
-                      if not (Hashtbl.mem lmap target) then
-                        Hashtbl.add lmap target (fresh_label ());
-                      out := Goto (Hashtbl.find lmap target) :: !out)
-                    else out := Goto target :: !out
-                | IfGoto (a, target) ->
-                    if target = header_label then out := IfGoto (a, next_hdr) :: !out
-                    else if S.mem target loop_labels then (
-                      if not (Hashtbl.mem lmap target) then
-                        Hashtbl.add lmap target (fresh_label ());
-                      out := IfGoto (a, Hashtbl.find lmap target) :: !out)
-                    else out := IfGoto (a, target) :: !out
-                | IfNotGoto (a, target) ->
-                    if target = header_label then out := IfNotGoto (a, next_hdr) :: !out
-                    else if S.mem target loop_labels then (
-                      if not (Hashtbl.mem lmap target) then
-                        Hashtbl.add lmap target (fresh_label ());
-                      out := IfNotGoto (a, Hashtbl.find lmap target) :: !out)
-                    else out := IfNotGoto (a, target) :: !out
-                | inst -> out := inst :: !out)
-                instrs;
-              List.rev !out
+            let loop_temp_defs = ref IntSet.empty in
+            for k = h to i do
+              List.iter (fun inst ->
+                match def_operand inst with
+                | Some (Temp t) -> loop_temp_defs := IntSet.add t !loop_temp_defs
+                | _ -> ())
+                (List.nth all k).instrs
+            done;
+            let remap_op tmap o =
+              match o with
+              | Temp t when IntSet.mem t !loop_temp_defs ->
+                  (match Hashtbl.find_opt tmap t with
+                   | Some t' -> Temp t'
+                   | None ->
+                       let t' = !inline_temp_uniq in
+                       incr inline_temp_uniq;
+                       Hashtbl.add tmap t t';
+                       Temp t')
+              | o -> o
+            in
+            let map_inst next_hdr tmap lmap inst =
+              match inst with
+              | Assign (d, s) -> Assign (remap_op tmap d, remap_op tmap s)
+              | AssignBinOp (d, op, a, b) ->
+                  AssignBinOp (remap_op tmap d, op, remap_op tmap a, remap_op tmap b)
+              | AssignUnOp (d, op, a) -> AssignUnOp (remap_op tmap d, op, remap_op tmap a)
+              | Goto target ->
+                  if target = header_label then Goto next_hdr
+                  else if S.mem target loop_labels then (
+                    if not (Hashtbl.mem lmap target) then Hashtbl.add lmap target (fresh_label ());
+                    Goto (Hashtbl.find lmap target))
+                  else Goto target
+              | IfGoto (a, target) ->
+                  if target = header_label then IfGoto (remap_op tmap a, next_hdr)
+                  else if S.mem target loop_labels then (
+                    if not (Hashtbl.mem lmap target) then Hashtbl.add lmap target (fresh_label ());
+                    IfGoto (remap_op tmap a, Hashtbl.find lmap target))
+                  else IfGoto (remap_op tmap a, target)
+              | IfNotGoto (a, target) ->
+                  if target = header_label then IfNotGoto (remap_op tmap a, next_hdr)
+                  else if S.mem target loop_labels then (
+                    if not (Hashtbl.mem lmap target) then Hashtbl.add lmap target (fresh_label ());
+                    IfNotGoto (remap_op tmap a, Hashtbl.find lmap target))
+                  else IfNotGoto (remap_op tmap a, target)
+              | Label l -> Label l
+              | Param a -> Param (remap_op tmap a)
+              | Call (d, fname, n) -> Call (remap_op tmap d, fname, n)
+              | Return (Some a) -> Return (Some (remap_op tmap a))
+              | Return None -> Return None
+            in
+            let clone_instrs next_hdr tmap lmap instrs =
+              List.map (map_inst next_hdr tmap lmap) instrs
             in
             let new_blocks_rev = ref [] in
             let push b = new_blocks_rev := b :: !new_blocks_rev in
+            let clone_hdrs = Array.init (factor - 1) (fun _ -> fresh_label ()) in
+            let prefix =
+              let rewrite_orig_next_hdr = function
+                | Goto l when l = header_label -> Goto clone_hdrs.(0)
+                | IfGoto (a, l) when l = header_label -> IfGoto (a, clone_hdrs.(0))
+                | IfNotGoto (a, l) when l = header_label -> IfNotGoto (a, clone_hdrs.(0))
+                | inst -> inst
+              in
+              List.mapi (fun k (b: basic_block) ->
+                if k = i then
+                  { b with
+                    instrs =
+                      (match List.rev b.instrs with
+                       | _ :: rest -> List.rev rest
+                       | [] -> [])
+                      |> List.map rewrite_orig_next_hdr }
+                else if k >= h && k <= i then
+                  { b with instrs = List.map rewrite_orig_next_hdr b.instrs }
+                else b)
+                (List.filteri (fun k _ -> k <= i) all)
+            in
             for rep = 0 to factor - 2 do
+              let tmap = Hashtbl.create 16 in
               let lmap = Hashtbl.create 16 in
               List.iter (fun (bb: basic_block) ->
                 if not (Hashtbl.mem lmap bb.label) then
@@ -1859,43 +1805,23 @@ let unroll_func (f: ir_func) : ir_func =
                 if rep + 1 < factor - 1 then clone_hdrs.(rep + 1) else header_label
               in
               let hp =
-                clone_instrs lmap false next_hdr hpart
-                @ [IfNotGoto (cond, exit_l)]
+                clone_instrs next_hdr tmap lmap hpart
+                @ [IfNotGoto (remap_op tmap cond, exit_l)]
               in
               push { label = clone_hdrs.(rep); instrs = hp };
-              List.iteri (fun k (bb: basic_block) ->
-                let drop = k = List.length body - 1 in
-                let instrs = clone_instrs lmap drop next_hdr bb.instrs in
+              List.iter (fun (bb: basic_block) ->
+                let instrs = clone_instrs next_hdr tmap lmap bb.instrs in
                 push { label = Hashtbl.find lmap bb.label; instrs })
                 body
             done;
-            let lmap = Hashtbl.create 16 in
-            List.iter (fun (bb: basic_block) ->
-              if not (Hashtbl.mem lmap bb.label) then
-                Hashtbl.add lmap bb.label (fresh_label ()))
-              body;
-            List.iter (fun (bb: basic_block) ->
-              let instrs = clone_instrs lmap false header_label bb.instrs in
-              push { label = Hashtbl.find lmap bb.label; instrs })
-              body;
-            let prefix =
-              List.mapi (fun k (b: basic_block) ->
-                if k = i then
-                  { b with
-                    instrs =
-                      (match List.rev b.instrs with
-                       | _ :: rest -> List.rev rest
-                       | [] -> []) }
-                else b)
-                (List.filteri (fun k _ -> k <= i) all)
-            in
             let suffix =
               List.filteri (fun k _ -> k > i) all
             in
             let all_new = prefix @ List.rev !new_blocks_rev @ suffix in
             (match all_new with
              | entry :: blocks ->
-                 rebuild_func f (flatten_func { f with entry; blocks })
+                 rebuild_func f
+                   (compact_temps (flatten_func { f with entry; blocks }))
              | [] -> f)
       | _ -> f
 
@@ -1974,9 +1900,9 @@ let optimize_program (prog: ir_program) : ir_program =
   let prog = optimize_all prog in
   let prog = inline_calls prog in
   let prog = optimize_all prog in
-  let prog = repeat_pass 12 licm_loops prog in
+  let prog = repeat_pass 6 licm_loops prog in
   let prog = optimize_all prog in
-  let prog = repeat_pass 6 unroll_loops prog in
+  let prog = repeat_pass 3 unroll_loops prog in
   let prog = optimize_all prog in
   let prog = const_eval_program prog in
   optimize_all prog
