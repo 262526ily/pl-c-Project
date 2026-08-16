@@ -1508,7 +1508,6 @@ let inline_calls (prog: ir_program) : ir_program =
 
 let licm_func (f: ir_func) (writes: (string, S.t) Hashtbl.t) : ir_func =
   let all = f.entry :: f.blocks in
-  let n = List.length all in
   let idx = Hashtbl.create 16 in
   List.iteri (fun i (b: basic_block) -> Hashtbl.replace idx b.label i) all;
   let cands = ref [] in
@@ -1662,7 +1661,6 @@ let unroll_func (f: ir_func) : ir_func =
   let factor = 4 in
   let size_cap = 4000 in
   let all = f.entry :: f.blocks in
-  let n = List.length all in
   let idx = Hashtbl.create 16 in
   List.iteri (fun i (b: basic_block) -> Hashtbl.replace idx b.label i) all;
   let cands = ref [] in
